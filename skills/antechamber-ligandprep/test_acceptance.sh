@@ -120,6 +120,16 @@ PY
 fi
 
 # ---- Case 3: Malformed ----------------------------------------------------
+# Skipped in --dry-run mode: the wrapper's dry-run plans the command chain
+# without executing any subprocess, so content-level malformation cannot be
+# detected. The "fails gracefully on bad input" contract is meaningful only
+# when the chain actually runs. Full-run executes Case 3 as designed.
+if [[ -n "$DRY_RUN" ]]; then
+  echo "[case 3] Malformed — SKIPPED in dry-run (planning cannot inspect content)" >&2
+  echo "[acceptance] dry-run: cases 1 + 2 passed; case 3 deferred to full run" >&2
+  exit 0
+fi
+
 echo "[case 3] Malformed — junk PDB; expect ok=false with parseable error" >&2
 
 MALFORMED_OUT="$RUN_BASE/malformed"
@@ -139,7 +149,7 @@ python3 "$WRAPPER" \
   --name BAD \
   --charge 0 \
   --output-dir "$MALFORMED_OUT" \
-  $DRY_RUN > "$MALFORMED_OUT/envelope.json" 2> "$MALFORMED_OUT/wrapper.stderr" || true
+  > "$MALFORMED_OUT/envelope.json" 2> "$MALFORMED_OUT/wrapper.stderr" || true
 
 assert_envelope_fail "$MALFORMED_OUT/envelope.json" "Malformed (graceful failure)"
 
