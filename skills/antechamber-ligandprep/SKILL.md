@@ -4,7 +4,7 @@ description: "Parameterize one ligand for AMBER MD: a PDB / SMILES / mol2 input 
 license: MIT
 homepage: https://github.com/zhoism/Single-Particle
 compatibility: Requires AmberTools (antechamber, parmchk2, pdb4amber) + OpenBabel (obabel) on PATH; AMBERHOME set.
-metadata: {"openclaw":{"requires":{"bins":["antechamber","parmchk2","obabel","pdb4amber"],"env":["AMBERHOME"]},"os":["darwin"]},"requires":{"bins":["antechamber","parmchk2","obabel","pdb4amber"],"env":["AMBERHOME"]},"inputs":{"input":"path_or_smiles","name":"residue_name (default LIG, 1-4 chars)","charge":"net_formal_charge (int, default 0)","output_dir":"path (default ./)"},"outputs":{"mol2":"<output_dir>/<NAME>.mol2","frcmod":"<output_dir>/<NAME>.frcmod"},"validation":["mol2_charge_column_present","atom_types_no_du_placeholder","frcmod_no_attn_lines","net_charge_within_5e-3_of_requested"],"dry_run":true,"source":"project-prime/skills/antechamber-ligandprep","stage":"Phase3.Stage2"}
+metadata: {"openclaw":{"requires":{"env":["AMBERHOME"]},"os":["darwin"]},"requires":{"bins":["antechamber","parmchk2","obabel","pdb4amber"],"env":["AMBERHOME"]},"inputs":{"input":"path_or_smiles","name":"residue_name (default LIG, 1-4 chars)","charge":"net_formal_charge (int, default 0)","output_dir":"path (default ./)"},"outputs":{"mol2":"<output_dir>/<NAME>.mol2","frcmod":"<output_dir>/<NAME>.frcmod"},"validation":["mol2_charge_column_present","atom_types_no_du_placeholder","frcmod_no_attn_lines","net_charge_within_5e-3_of_requested"],"dry_run":true,"source":"project-prime/skills/antechamber-ligandprep","stage":"Phase3.Stage2"}
 ---
 
 # antechamber-ligandprep
