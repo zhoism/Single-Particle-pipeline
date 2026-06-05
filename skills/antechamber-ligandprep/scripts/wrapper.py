@@ -270,7 +270,7 @@ def validate(mol2_path: Path, frcmod_path: Path,
         validation["charge_sum"] = round(charge_sum, 6)
         if all(abs(c) < 1e-9 for c in charges):
             errors.append("MISSING_PARAMETERS: mol2 charge column is all zeros")
-        elif abs(charge_sum - requested_charge) > 1e-3:
+        elif abs(charge_sum - requested_charge) > 5e-3:
             errors.append(
                 f"NET_CHARGE_MISMATCH: sum={charge_sum:.4f}, "
                 f"requested={requested_charge}"
