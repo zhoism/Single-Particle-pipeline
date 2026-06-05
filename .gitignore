@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# AMBER / MD outputs — large binary trajectories
+*.nc
+*.dcd
+*.rst
+*.rst7
+*.mdcrd
+*.mden
+*.mdinfo
+
+# AMBER generated prep + analysis artifacts (recipes .leap/.in/.cpptraj/.sh stay tracked)
+*.prmtop
+*.inpcrd
+*.out
+*.dat
+*.mol2
+*.frcmod
+*.pdb
+sqm.in
+sqm.out
+ATOMTYPE.INF
+ANTECHAMBER_*
+PREP.INF
+NEWPDB.PDB
+plip_out/
+leap.log
+mdinfo
+
+# Simulation runs go here; whole directory is ignored except for .gitkeep
+runs/*
+!runs/.gitkeep
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log
+
+# Acceptance-test + end-to-end run scratch (envelopes/figures regenerated on demand)
+**/test-runs/
+happy-path-run/
+
+# Golden-path fixtures are essential pipeline inputs — keep despite the *.pdb rule
+!golden-path/1L2Y/1L2Y-1.pdb
+!golden-path/1L2Y/ligand.pdb

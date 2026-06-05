@@ -1,0 +1,18 @@
+[project]
+name = "project-prime"
+version = "0.0.1"
+description = "OpenClaw Agent Skills for automating explicit-solvent MD simulations in AMBER"
+readme = "CLAUDE.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+# Dependencies will fill in as the stack solidifies:
+# - OpenClaw client (whichever package/path the framework ships as)
+# - DPDispatcher (job dispatch — installed locally given local-only deployment)
+# - An Ollama client (e.g. `ollama` or raw httpx against localhost:11434)
+# - A Google AI Studio client (e.g. `google-generativeai`) — fallback for heavier reasoning
+# - Parsing/validation: pydantic, ruamel.yaml (for mdin / skill.md frontmatter)
+# - Plotting: matplotlib + seaborn for Phase 4 RMSD/RMSF outputs
