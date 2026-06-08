@@ -54,6 +54,7 @@ runs/*
 **/test-runs/
 happy-path-run/
 happy-path-fixed-run/
+pipeline-async-run-*/
 
 # Golden-path fixtures are essential pipeline inputs — keep despite the *.pdb rule
 !golden-path/1L2Y/1L2Y-1.pdb
