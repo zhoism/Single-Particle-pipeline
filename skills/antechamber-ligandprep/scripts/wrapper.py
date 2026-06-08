@@ -105,6 +105,34 @@ def classify_input(value: str) -> tuple[str, Path | None]:
     return "smiles", None
 
 
+def pdb_has_hydrogens(path: Path) -> bool:
+    """True if any ATOM/HETATM record in the PDB is a hydrogen.
+
+    Trusts the PDB element column (cols 77-78) when populated; falls back to an
+    atom-name heuristic (first alphabetic char of the name, after stripping any
+    leading digits, is 'H') for hand-edited PDBs that omit the element field.
+    Drives routing: an H-complete PDB is fed straight to antechamber so it does
+    its OWN bond perception (kekulizes aromatics correctly), instead of routing
+    through obabel on a heavy-atom-only skeleton where kekulization fails.
+    """
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except OSError:
+        return False
+    for ln in lines:
+        if not (ln.startswith("ATOM") or ln.startswith("HETATM")):
+            continue
+        element = ln[76:78].strip() if len(ln) >= 78 else ""
+        if element:
+            if element.upper() == "H":
+                return True
+            continue  # populated element, not H -> not a hydrogen record
+        name = ln[12:16].strip() if len(ln) >= 16 else ""
+        if name.lstrip("0123456789")[:1].upper() == "H":
+            return True
+    return False
+
+
 # ---- Step runner ---------------------------------------------------------
 
 def run_step(label: str, cmd: list[str], run_dir: Path,
@@ -131,14 +159,44 @@ class StepFailure(RuntimeError):
         self.stderr_path = stderr_path
 
 
+def kekulize_failed(stderr_path: Path) -> bool:
+    """True if an obabel step logged a kekulization failure (unreliable bonds)."""
+    try:
+        return "Failed to kekulize aromatic bonds" in stderr_path.read_text(
+            errors="ignore")
+    except OSError:
+        return False
+
+
+def _maybe_kekulize_error(label: str, run_dir: Path, dry_run: bool) -> str | None:
+    """Turn an obabel kekulization failure into a fatal, inspectable error.
+
+    obabel can silently emit chemically-wrong bond orders (and drop ring N-H)
+    when it cannot kekulize an aromatic system; antechamber then types the
+    garbage and every downstream gate passes. Surface it loudly instead.
+    """
+    if dry_run:
+        return None
+    if kekulize_failed(run_dir / f"{label}.err"):
+        return ("AROMATIC_PERCEPTION_FAILED: obabel could not kekulize aromatic "
+                f"bonds (see {label}.err); the perceived bond orders are "
+                "unreliable, so the GAFF2 typing would be wrong. Supply a "
+                "fully-protonated PDB (uses direct antechamber perception) or a "
+                "hand-built mol2.")
+    return None
+
+
 # ---- Pipeline ------------------------------------------------------------
 
 def prep_input(mode: str, src: Path | None, smiles: str | None,
                run_dir: Path, charge: int, dry_run: bool
-               ) -> tuple[Path, list[dict[str, Any]]]:
-    """Produce a single canonical mol2 (with H, GAFF-typeable) for antechamber.
+               ) -> tuple[Path, str, list[dict[str, Any]], str | None]:
+    """Prepare the ligand for antechamber.
 
-    Returns (path-to-prepped-mol2, list-of-step-records).
+    Returns (prepped_path, antechamber_input_format, step_records, prep_error).
+    `antechamber_input_format` is "pdb" when we hand antechamber the raw PDB so it
+    perceives its own bonds, else "mol2". `prep_error` is non-None (fatal) only
+    when an obabel step failed to kekulize an aromatic system.
     """
     steps: list[dict[str, Any]] = []
     obabel = resolve_bin("obabel") or "obabel"
@@ -146,6 +204,15 @@ def prep_input(mode: str, src: Path | None, smiles: str | None,
 
     if mode == "pdb":
         assert src is not None
+        # If the PDB already carries hydrogens, feed it straight to antechamber:
+        # antechamber's own bond perception kekulizes aromatics correctly, whereas
+        # pdb4amber --nohyd + obabel must re-perceive from a heavy-atom-only
+        # skeleton and silently mis-types aromatic rings (dropping ring N-H).
+        if pdb_has_hydrogens(src):
+            steps.append({"label": "01_direct_pdb", "planned": dry_run,
+                          "cmd": ["(direct)", str(src)]})
+            return src, "pdb", steps, None
+        # H-absent: must add hydrogens. pdb4amber cleanup -> obabel protonation.
         cleaned = run_dir / "01_pdb4amber.pdb"
         steps.append(run_step("01_pdb4amber",
                               [pdb4amber, "-i", str(src),
@@ -156,7 +223,8 @@ def prep_input(mode: str, src: Path | None, smiles: str | None,
                               [obabel, str(cleaned), "-O", str(prepped),
                                "-p", "7.4"],
                               run_dir, dry_run))
-        return prepped, steps
+        return prepped, "mol2", steps, _maybe_kekulize_error(
+            "02_obabel_h", run_dir, dry_run)
 
     if mode == "smiles":
         assert smiles is not None
@@ -165,7 +233,8 @@ def prep_input(mode: str, src: Path | None, smiles: str | None,
                               [obabel, f"-:{smiles}", "-O", str(prepped),
                                "--gen3d", "-p", "7.4"],
                               run_dir, dry_run))
-        return prepped, steps
+        return prepped, "mol2", steps, _maybe_kekulize_error(
+            "01_obabel_smiles", run_dir, dry_run)
 
     if mode == "mol2":
         assert src is not None
@@ -174,7 +243,7 @@ def prep_input(mode: str, src: Path | None, smiles: str | None,
             shutil.copy(src, prepped)
         steps.append({"label": "01_passthrough", "planned": dry_run,
                       "cmd": ["cp", str(src), str(prepped)]})
-        return prepped, steps
+        return prepped, "mol2", steps, None
 
     if mode == "sdf":
         assert src is not None
@@ -183,23 +252,30 @@ def prep_input(mode: str, src: Path | None, smiles: str | None,
                               [obabel, str(src), "-O", str(prepped),
                                "-p", "7.4"],
                               run_dir, dry_run))
-        return prepped, steps
+        return prepped, "mol2", steps, _maybe_kekulize_error(
+            "01_obabel_sdf", run_dir, dry_run)
 
     raise ValueError(f"INVALID_INPUT: unsupported mode {mode!r}")
 
 
-def run_antechamber(prepped: Path, name: str, charge: int,
+def run_antechamber(prepped: Path, input_format: str, name: str, charge: int,
                     run_dir: Path, dry_run: bool) -> tuple[Path, dict[str, Any]]:
     antechamber = resolve_bin("antechamber") or "antechamber"
     out_mol2 = run_dir / f"{name}.mol2"
     cmd = [antechamber,
-           "-i", str(prepped), "-fi", "mol2",
+           "-i", str(prepped), "-fi", input_format,
            "-o", str(out_mol2), "-fo", "mol2",
            "-c", "bcc",
            "-nc", str(charge),
            "-at", "gaff2",
            "-rn", name,
            "-pf", "y"]
+    if input_format == "pdb":
+        # A PDB carries no bond orders, so antechamber runs its own atom+bond-type
+        # perception (-j 4) and kekulizes aromatics correctly. acdoctor stays ON
+        # (verified to pass and type the indole correctly) — it is a real
+        # input-sanity gate, so we do NOT silence it with -dr no.
+        cmd += ["-j", "4"]
     rec = run_step("03_antechamber", cmd, run_dir, dry_run)
     return out_mol2, rec
 
@@ -310,7 +386,7 @@ def classify_step_failure(exc: StepFailure, run_dir: Path) -> str:
         return f"INPUT_PREP_FAILED: {exc}"
     if exc.label.startswith(("01_pdb4amber", "01_obabel_smiles",
                              "01_obabel_sdf", "02_obabel_h",
-                             "01_passthrough")):
+                             "01_passthrough", "01_direct_pdb")):
         return f"INPUT_PREP_FAILED: {exc}"
     return f"INPUT_PREP_FAILED: {exc}"
 
@@ -360,12 +436,17 @@ def main() -> None:
     planned_steps: list[dict[str, Any]] = []
 
     try:
-        prepped, prep_records = prep_input(mode, src, smiles_in,
-                                           run_dir, args.charge, args.dry_run)
+        prepped, input_format, prep_records, prep_error = prep_input(
+            mode, src, smiles_in, run_dir, args.charge, args.dry_run)
         planned_steps.extend(prep_records)
+        if prep_error:
+            emit_and_exit(ok=False, dry_run=args.dry_run,
+                          outputs={"run_dir": str(run_dir),
+                                   "planned_steps": planned_steps},
+                          errors=[prep_error], code=2)
 
-        out_mol2, ac_rec = run_antechamber(prepped, args.name, args.charge,
-                                           run_dir, args.dry_run)
+        out_mol2, ac_rec = run_antechamber(prepped, input_format, args.name,
+                                           args.charge, run_dir, args.dry_run)
         planned_steps.append(ac_rec)
 
         out_frcmod, pc_rec = run_parmchk2(out_mol2, args.name, run_dir,

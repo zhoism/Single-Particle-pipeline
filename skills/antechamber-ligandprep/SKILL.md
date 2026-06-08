@@ -70,21 +70,33 @@ Single JSON envelope on stdout. stderr is human-readable per-step progress.
 | `MISSING_ENV` | `AMBERHOME` is unset. | `source amber.sh` from the AmberTools install. |
 | `INVALID_INPUT` | File extension unrecognized, file empty, or SMILES un-parseable. | Caller cleans input and retries. |
 | `INPUT_PREP_FAILED` | `pdb4amber` or `obabel` exited non-zero on the input. | Inspect `<run_dir>/01_inputprep.err`. PDB likely has malformed `HETATM` columns or no atoms. |
+| `AROMATIC_PERCEPTION_FAILED` | obabel logged `Failed to kekulize aromatic bonds` (H-absent PDB / sdf / SMILES path). Its perceived bond orders are unreliable, so GAFF2 typing would be silently wrong. | Supply a **fully-protonated PDB** (routes to direct antechamber perception, which kekulizes correctly) or a hand-built mol2. Inspect `<run_dir>/02_obabel_h.err`. |
 | `SQM_CONVERGENCE_FAILED` | AM1 SCF in `sqm` did not converge during AM1-BCC. | See `references/heuristics.md` — try a different `--charge`, or hand-typed input. Rings + multiple halogens are the usual trigger. |
 | `MISSING_PARAMETERS` | `parmchk2` flagged `ATTN` lines. | Manual frcmod edit, or alternative force field for the affected motif. |
 | `NET_CHARGE_MISMATCH` | Sum of mol2 charges differs from `--charge` by more than `5e-3`. | Usually wrong `--charge` for the input topology; recompute. |
 
 ## How it works
 
-`{baseDir}/scripts/wrapper.py` runs the full chain as ordinary Python subprocesses and returns one envelope. The agent makes one `exec` call, gets one result. Internal stages, suppressed from the LLM's view:
+Invocation (the agent makes ONE `exec` call):
+
+```
+python3 {baseDir}/scripts/wrapper.py --input <path-or-SMILES> --name <RESNAME> --charge <int> --output-dir <dir>
+```
+
+`{baseDir}/scripts/wrapper.py` runs the full chain as ordinary Python subprocesses and returns one envelope. Internal stages, suppressed from the LLM's view:
 
 1. Input classification — PDB / mol2 / sdf / SMILES.
-2. Input prep — `pdb4amber` (for PDB) and `obabel` with `--gen3d` + protonation at pH 7.4 as needed.
-3. Atom typing + charges — `antechamber -c bcc -at gaff2 -rn <NAME> -nc <CHARGE>`.
+2. Input prep — **branches on whether a PDB already carries hydrogens**:
+   - **PDB *with* H** → fed straight to `antechamber -fi pdb -j 4`, so antechamber does its **own** bond perception (kekulizes aromatic rings correctly and preserves ring N–H). `pdb4amber`/`obabel` are skipped.
+   - **PDB *without* H** (and sdf) → `pdb4amber --nohyd` (PDB) then `obabel -p 7.4` to add hydrogens; SMILES → `obabel --gen3d -p 7.4`. These obabel steps are checked for a kekulization failure (→ `AROMATIC_PERCEPTION_FAILED`), since obabel can silently emit wrong bond orders when re-perceiving an aromatic from a heavy-atom-only skeleton.
+   - **mol2** → passed through unchanged (the caller's bonds are trusted).
+3. Atom typing + charges — `antechamber -c bcc -at gaff2 -rn <NAME> -nc <CHARGE>` (`-fi pdb -j 4` on the direct path, else `-fi mol2`).
 4. Missing-parameter check — `parmchk2 -s gaff2`.
 5. Validation sweep against the four gates above.
 
 Each subprocess streams to `<run_dir>/NN_stage.{out,err}`. The envelope returns absolute paths.
+
+**Limitation:** the wrapper does not auto-complete partial protonation or split multi-MODEL/alt-loc PDBs. Supply a fully-protonated, single-conformer PDB (it routes to direct antechamber perception) or use the SMILES/sdf path (obabel adds H).
 
 ## References
 
@@ -93,8 +105,9 @@ Each subprocess streams to `<run_dir>/NN_stage.{out,err}`. The envelope returns 
 ## Acceptance test
 
 `bash test_acceptance.sh` runs:
-1. **Golden** — benzene from `project-prime/golden-path/ligand_raw.pdb` (extracted from PDB 181L; validated fixture from 2026-05-21). Asserts `ok: true`, atom types contain `ca` / `ha`, charge sum within `1e-3` of 0.
+1. **Golden** — benzene from `project-prime/golden-path/ligand_raw.pdb` (extracted from PDB 181L; validated fixture from 2026-05-21; H-absent → obabel path). Asserts `ok: true`, atom types contain `ca` / `ha`.
 2. **Unrelated** — methane via SMILES `C`. Asserts `ok: true`, atom types contain `c3` / `hc`.
 3. **Malformed** — a deliberately broken PDB. Asserts `ok: false` with a parseable error code, NOT a silent crash.
+4. **Aromatic** — indole from `project-prime/golden-path/1L2Y/ligand.pdb` (H-present → direct-antechamber path). Regression guard for the obabel-kekulize bug: asserts `ok: true`, atom types **contain** `ca` / `cc` / `cd` / `na` / `hn` (correct aromatic indole) and **exclude** `c2` / `ce` / `cf` / `ne` (the non-aromatic mis-typing).
 
-All three must pass before Stage 2 flips to COMPLETE in `Phase3_Taskboard_Manifest.md`.
+All four must pass before Stage 2 flips to COMPLETE in `Phase3_Taskboard_Manifest.md`.

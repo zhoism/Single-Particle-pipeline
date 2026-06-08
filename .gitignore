@@ -53,6 +53,7 @@ runs/*
 # Acceptance-test + end-to-end run scratch (envelopes/figures regenerated on demand)
 **/test-runs/
 happy-path-run/
+happy-path-fixed-run/
 
 # Golden-path fixtures are essential pipeline inputs — keep despite the *.pdb rule
 !golden-path/1L2Y/1L2Y-1.pdb

@@ -38,21 +38,23 @@ So this file is sibling to `SKILL.md` and consumed by the planner / recovery / h
 
 **Source:** Upstream `molecular-dynamics/antechamber/SKILL.md` §Charge Generation.
 
-### Pre-prep: pdb4amber before antechamber on PDB inputs
+### Input prep: route on whether the PDB already has hydrogens (2026-06-08 fix)
 
-**When applies:** PDB input. The wrapper runs `pdb4amber --nohyd` first.
+**When applies:** PDB input. The wrapper branches:
+- **PDB *with* hydrogens** → fed straight to `antechamber -fi pdb -j 4`. `pdb4amber`/`obabel` are skipped.
+- **PDB *without* hydrogens** (and sdf) → `pdb4amber --nohyd` then `obabel -p 7.4` to add H; SMILES → `obabel --gen3d -p 7.4`.
 
-**Why:** PDB extracts from crystal structures often have alt-locs, hydrogens at non-standard positions, and (for ligands extracted with `pdb_selres` or hand-edits) residue/chain identifiers that confuse downstream parsers. `pdb4amber --nohyd` strips hydrogens (we re-add at pH 7.4 via obabel for predictable protonation) and normalizes alt-locs. Skipping this step is the most common cause of antechamber `acdoctor`-mode rejections on protein-extracted ligands.
+**Why:** The original chain *always* ran `pdb4amber --nohyd` (strip all H) → `obabel -p 7.4` (re-add H). For an **aromatic** ligand this is actively harmful: obabel must then re-perceive bonds from a heavy-atom-only skeleton, fails to kekulize the ring (`Failed to kekulize aromatic bonds`), and emits a non-aromatic perception that even drops the ring N–H. antechamber, fed that obabel `.mol2` (`-fi mol2`), trusts the broken bonds and types the ring as a conjugated polyene (`c2/ce/cf/ne`, no `ca/cc/cd/na`, no `hn`). Every output gate (charge, `du`, `ATTN`) passed → a silent scientific failure (confirmed on the 1L2Y indole; it had propagated into the published MM-GBSA ΔG). Feeding the **H-complete PDB** to antechamber with `-fi pdb -j 4` forces antechamber's *own* bond perception, which kekulizes correctly (verified: `6×ca, cc, cd, na, hn`, N–H restored). The `pdb4amber --nohyd` H-strip was a pattern borrowed from protein prep (ff19SB H-naming); it does not belong on a ligand that already carries good hydrogens.
 
-**Source:** AmberTools manual §pdb4amber; project golden-path 2026-05-21 build (Stage 2 used the same chain successfully).
+**Source:** Project Day-8 (2026-06-08) bug investigation; verified empirically against the 1L2Y indole fixture. acdoctor stays ON on the direct path (it passes and types correctly — no need to silence it).
 
-### Protonation: obabel `-p 7.4` for biomolecular MD
+### Protonation: obabel `-p 7.4` only when hydrogens must be added
 
-**When applies:** Any input that may be missing hydrogens, or where their positions are crystallographically ambiguous. The wrapper always runs obabel with `-p 7.4` on PDB and SMILES paths.
+**When applies:** H-absent PDB, sdf, and SMILES paths (where the wrapper must add hydrogens). An H-complete PDB keeps the protonation state the caller supplied (more faithful than re-guessing at pH 7.4).
 
-**Why:** Physiological pH is the default state for the protein-binding context. Setting `-p 7.4` makes obabel choose protonation per residue/atom by the standard set of pKas, deterministically. Without `-p`, obabel adds hydrogens but does not adjust protonation, which leaves charged groups in their crystal-form state — usually fine for neutral ligands but a silent error source for ionizable ones.
+**Why:** Physiological pH is the default state for the protein-binding context. Setting `-p 7.4` makes obabel choose protonation per atom by the standard pKas, deterministically. But when the input already encodes a deliberate protonation/tautomer state (an H-complete PDB), re-running obabel would both discard that intent and risk the kekulization failure above — so the direct path trusts the input H instead.
 
-**Source:** OpenBabel manual §Hydrogen treatment; project smoke-test 2026-05-19.
+**Source:** OpenBabel manual §Hydrogen treatment; project smoke-test 2026-05-19; Day-8 routing fix.
 
 ## Anti-heuristics (do not do this)
 
@@ -70,6 +72,7 @@ So this file is sibling to `SKILL.md` and consumed by the planner / recovery / h
 | `MISSING_PARAMETERS` (ATTN lines) | parmchk2 frcmod contains `ATTN, need revision` lines under BOND/ANGLE/DIHE | A bond or angle in the molecule has no GAFF2 analogue (rare on common drug scaffolds, common on metal-containing or highly fluorinated species) | Manual frcmod edit using a chemically similar GAFF2 type, or a force-field swap (e.g., OpenFF). Out of Stage 2 scope; flag for Stage 8 recovery. |
 | `NET_CHARGE_MISMATCH` | Validation gate fires with `sum != requested` | Wrong `--charge` for the protonation state obabel produced at pH 7.4. The common case: a histidine-like ligand where obabel chose a different tautomer than the crystal | Recompute net charge from the obabel-output mol2 (count formal charges in the atom block) and retry with the corrected `--charge`. |
 | `INPUT_PREP_FAILED` | pdb4amber or obabel non-zero exit | Malformed PDB (truncated columns, no atoms, mixed alt-loc indicators) or unparseable SMILES | Caller cleans the input. The wrapper does NOT attempt to repair — that's a separate skill. |
+| `AROMATIC_PERCEPTION_FAILED` | obabel `.err` contains `Failed to kekulize aromatic bonds` | An aromatic ligand was routed through obabel on a heavy-atom-only skeleton (H-absent PDB, or sdf/SMILES that obabel could not kekulize) → unreliable bond orders → wrong GAFF2 typing | Supply a fully-protonated PDB (routes to direct antechamber `-fi pdb -j 4` perception, which kekulizes correctly) or a hand-built mol2. This gate is the loud replacement for what used to be a silent mis-typing. |
 
 ## Attribution
 

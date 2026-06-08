@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # antechamber-ligandprep acceptance test.
 #
-# Three test cases per the manifest's general acceptance discipline:
+# Four test cases per the manifest's general acceptance discipline:
 #   1. Golden    — benzene PDB extract from PDB 181L (project-prime/golden-path/).
 #   2. Unrelated — methane via SMILES "C" (exercises the SMILES path).
 #   3. Malformed — a junk PDB (asserts ok=false with a parseable error code).
+#   4. Aromatic  — indole PDB with H (1L2Y MOL): regression guard for the
+#                  obabel-kekulize bug; must yield aromatic types (ca/cc/cd/na/hn),
+#                  not the non-aromatic mis-typing (c2/ce/cf/ne).
 #
-# All three must pass before this skill is promoted from BUILT to COMPLETE
+# All four must pass before this skill is promoted from BUILT to COMPLETE
 # in Phase3_Taskboard_Manifest.md.
 
 set -euo pipefail
@@ -119,6 +122,48 @@ PY
   pass "Unrelated GAFF2 atom-type check (c3, hc)"
 fi
 
+# ---- Case 4: Aromatic PDB with hydrogens (indole / 1L2Y MOL) --------------
+# Regression guard for the obabel-kekulize bug. An H-complete aromatic PDB must
+# route directly to antechamber (-fi pdb) and yield CORRECT aromatic GAFF2 types
+# (ca/cc/cd/na/hn), never the non-aromatic mis-typing (c2/ce/cf/ne) that obabel
+# produced when forced to perceive bonds from a heavy-atom-only skeleton.
+echo "[case 4] Aromatic — indole PDB with H (1L2Y MOL), direct-antechamber path" >&2
+
+INDOLE_INPUT="/Users/kevinzhou/Downloads/Single Particle/project-prime/golden-path/1L2Y/ligand.pdb"
+if [[ ! -f "$INDOLE_INPUT" ]]; then
+  fail "Indole fixture missing at $INDOLE_INPUT"
+fi
+
+INDOLE_OUT="$RUN_BASE/indole"
+rm -rf "$INDOLE_OUT" && mkdir -p "$INDOLE_OUT"
+
+python3 "$WRAPPER" \
+  --input "$INDOLE_INPUT" \
+  --name MOL \
+  --charge 0 \
+  --output-dir "$INDOLE_OUT" \
+  $DRY_RUN > "$INDOLE_OUT/envelope.json" || true
+
+assert_envelope_ok "$INDOLE_OUT/envelope.json" "Indole (aromatic PDB)"
+
+if [[ -z "$DRY_RUN" ]]; then
+  python3 - "$INDOLE_OUT/envelope.json" <<'PY' || fail "Indole aromatic-typing regression (kekulize bug)"
+import json, sys
+e = json.load(open(sys.argv[1]))
+types = set(e.get("validation", {}).get("atom_types", []))
+need   = {"ca", "cc", "cd", "na", "hn"}   # correct aromatic indole typing
+broken = {"c2", "ce", "cf", "ne"}         # signature of botched kekulization
+missing = need - types
+bad = broken & types
+if missing or bad:
+    print("  got types:", sorted(types), file=sys.stderr)
+    print("  missing required:", sorted(missing), file=sys.stderr)
+    print("  present broken:", sorted(bad), file=sys.stderr)
+    sys.exit(1)
+PY
+  pass "Indole GAFF2 aromatic-type check (ca/cc/cd/na/hn present; c2/ce/cf/ne absent)"
+fi
+
 # ---- Case 3: Malformed ----------------------------------------------------
 # Skipped in --dry-run mode: the wrapper's dry-run plans the command chain
 # without executing any subprocess, so content-level malformation cannot be
@@ -126,7 +171,7 @@ fi
 # when the chain actually runs. Full-run executes Case 3 as designed.
 if [[ -n "$DRY_RUN" ]]; then
   echo "[case 3] Malformed — SKIPPED in dry-run (planning cannot inspect content)" >&2
-  echo "[acceptance] dry-run: cases 1 + 2 passed; case 3 deferred to full run" >&2
+  echo "[acceptance] dry-run: cases 1 + 2 + 4 passed; case 3 deferred to full run" >&2
   exit 0
 fi
 
@@ -153,4 +198,4 @@ python3 "$WRAPPER" \
 
 assert_envelope_fail "$MALFORMED_OUT/envelope.json" "Malformed (graceful failure)"
 
-echo "[acceptance] all three cases passed" >&2
+echo "[acceptance] all four cases passed" >&2
