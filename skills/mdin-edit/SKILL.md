@@ -1,0 +1,199 @@
+---
+name: mdin-edit
+description: "Edit one parameter in one stage (or a stage-group) of a pre-prepared AMBER mdin set. The agent maps natural language ('set the timestep to 0.001 in the first heating stage') to structured args; this wrapper does an idempotent, byte-minimal parse-replace (never appends), bounds-checked and stage-aware, with &wt temp0-ramp consistency, a post-edit self-check, and a change log. Operates on a COPY; the LLM never edits files."
+license: MIT
+homepage: https://github.com/zhoism/Single-Particle
+compatibility: Pure Python 3 (stdlib only). No AMBER binaries required to edit; AmberTools/pmemd only needed to later RUN the edited files.
+metadata: {"openclaw":{"requires":{"env":[]},"os":["darwin"]},"requires":{"bins":[],"env":[]},"inputs":{"md_dir":"path — a COPY of the advisor's mdin set","stage":"stage name | group:third-onward | group:all","param":"dt|cut|temp0|restraint_wt|nstlim","value":"number","dry_run":"flag"},"outputs":{"files":"per-stage edit records (old→new per namelist.param)","log":"<md_dir>/mdin-edit.log"},"validation":["idempotent_parse_replace_never_append","bounds_dt_cut_temp0_restraint_wt_nstlim","stage_aware_file_targeting","wt_temp0_value2_coupling","post_edit_self_check_reparse"],"dry_run":true,"source":"project-prime/skills/mdin-edit","stage":"Phase3.ParamEditor"}
+---
+
+# mdin-edit
+
+## Goal
+
+Take a pre-prepared AMBER molecular-dynamics input set (the advisor's `min1 … prod`
+mdin chain) and change **one parameter** in **one stage** — or one parameter across a
+named **group** of stages — *correctly and predictably, no matter how many times it is
+run*. The agent turns a natural-language request ("relax the positional restraints to
+1.0 in the second pressurization stage") into structured arguments; this wrapper does
+the deterministic edit: it finds the parameter inside the right namelist, checks it
+against physical bounds, rewrites only the numeric token (preserving every comma,
+comment, and space), keeps the heating-stage `&wt` temperature ramp consistent,
+re-parses to confirm the result, and appends a change-log line. The LLM never touches
+the file — per the project's "lobster-like" discipline, all chemistry-critical mutation
+is deterministic Python.
+
+This is the *editor* counterpart to `amber-md-run` (which *generates* its own namelists).
+`mdin-edit` does not generate anything — it surgically modifies files the advisor already
+prepared.
+
+## When to use
+
+- The advisor's parameter-editing task: change `dt`, `cut`, `temp0`, `restraint_wt`, or
+  `nstlim` in a named stage of `phase3-explicit-solvent-md/`, in natural language, then
+  record the change.
+- Tuning an existing mdin set (e.g. lengthen production, lower the cutoff, ramp to a new
+  target temperature) without hand-editing files and risking a silent typo.
+- Aligning the known heat-3 `temp0`/`&wt value2` inconsistency by setting `temp0` (the
+  `&wt` ramp end is coupled automatically).
+
+## Inputs
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `--md-dir` | path | yes | Directory holding the mdin files. **Pass a COPY** of the advisor's set — the skill is non-destructive but the copy-first discipline is yours. |
+| `--stage` | string | yes | A stage (`min1`, `min2`, `heat-1…3`, `press-1…3`, `relax`, `prod`) **or** a group: `group:third-onward` = {heat-3, press-3, relax, prod}; `group:all` = all 10. |
+| `--param` | string | yes | One of `dt`, `cut`, `temp0`, `restraint_wt`, `nstlim`. |
+| `--value` | number | yes | The new value. Rendered canonically (`310` → `310.0` for float params; integer for `nstlim`). |
+| `--dry-run` | flag | no | Plan + validate the edit and print the would-be result; write nothing, log nothing. |
+
+## Outputs
+
+Single JSON envelope on stdout; stderr is human-readable per-file progress.
+
+```json
+{
+  "ok": true,
+  "skill": "mdin-edit",
+  "dry_run": false,
+  "outputs": {
+    "md_dir": "/abs/phase3-work",
+    "stage": "group:third-onward",
+    "param": "temp0",
+    "value": "310.0",
+    "files": [
+      {"file": "heat-3.in", "status": "edited",
+       "edits": [
+         {"namelist": "cntrl", "param": "temp0",  "old": "300.0", "new": "310.0", "changed": true},
+         {"namelist": "wt",    "param": "value2", "old": "310.0", "new": "310.0", "changed": false}
+       ]},
+      {"file": "press-3.in", "status": "edited",
+       "edits": [{"namelist": "cntrl", "param": "temp0", "old": "300.0", "new": "310.0", "changed": true}]},
+      {"file": "relax.in", "status": "edited", "edits": [/* temp0 only — no &wt */]},
+      {"file": "prod.in",  "status": "edited", "edits": [/* temp0 only */]}
+    ],
+    "log": "/abs/phase3-work/mdin-edit.log"
+  },
+  "validation": {
+    "per_file": {
+      "heat-3.in": {"verdict": "WARN", "findings": [{"level": "PASS", "rule": "temp0 / &wt coherent", "detail": "...", "deliberate": false}]}
+    }
+  },
+  "errors": []
+}
+```
+
+Per-file `status` is one of `edited` (a value changed), `unchanged` (already at the target
+— idempotent no-op), `skipped` (not applicable here — e.g. `restraint_wt` where `ntr=0`,
+in a group edit), or `error` (a hard failure; see Errors). A single hard `error` makes the
+whole batch `ok:false` and **writes nothing** (all-or-nothing).
+
+## Validation gates
+
+- **Idempotent parse-replace, never append.** Only the numeric token is rewritten; comma,
+  inline comment, indentation and `=` spacing are preserved. Re-running the same edit yields
+  a byte-identical file (`status:"unchanged"`).
+- **Bounds (hard, reject = `OUT_OF_BOUNDS`):** `0 < dt ≤ 0.002` ps (2 fs SHAKE cap), `0 <
+  temp0 ≤ 400` K, `restraint_wt ≥ 0`, `nstlim > 0` (integer), `6 ≤ cut ≤ 12` Å. Advisory
+  **WARN** for `6 ≤ cut < 8` Å (below the project validator's explicit-solvent floor, but
+  accepted deliberately — PME reciprocal space covers long-range electrostatics).
+- **Stage-aware targeting.** `--stage`/group resolves to the right file(s); a parameter that
+  isn't present in a stage (`dt`/`temp0` in `min1/min2`) is refused, not appended.
+- **`&wt` temp0-ramp coupling.** Editing `temp0` in a heating stage with `nmropt=1` also sets
+  the `&wt TEMP0` block's `value2` (the ramp end), keeping them consistent. (`value1`, the
+  ramp start, is never touched.)
+- **Post-edit self-check.** The result is re-parsed with an independent parser and the new
+  value asserted; a mismatch is a hard `SELF_CHECK_FAILED` and **nothing is written**.
+- **Advisory validation.** The vendored `check_amber` logic runs over the result for
+  transparency (e.g. confirming the heat-3 mismatch is gone). Its findings never gate `ok`;
+  a FAIL on the exact value you deliberately set within bounds is downgraded to a WARN.
+
+## Errors
+
+| Code | Cause | Recovery |
+|------|-------|----------|
+| `UNSUPPORTED_PARAM` | `--param` not in {dt, cut, temp0, restraint_wt, nstlim}. | Use a supported parameter (extend `HARD_BOUNDS` to add more). |
+| `OUT_OF_BOUNDS` | Value violates the physical bound for that param. | Choose a value within bounds; see Validation gates. |
+| `NONINTEGER_VALUE` | `nstlim` given a non-integer. | Pass an integer number of steps. |
+| `UNKNOWN_STAGE` | `--stage` not a stage or group. | Use a listed stage or `group:third-onward`/`group:all`. |
+| `MD_DIR_NOT_FOUND` | `--md-dir` is not a directory. | Point at a copy of the mdin set. |
+| `STAGE_FILE_MISSING` | The stage's `.in` file isn't in `--md-dir`. | Copy the full set. |
+| `PARAM_NOT_FOUND` | Param absent in that stage's `&cntrl` (e.g. `dt` in `min1`). | Single-stage → error; in a group it's a `skipped`, not a failure. Never appended. |
+| `SKIPPED_RESTRAINTS_OFF` | `restraint_wt` where `ntr≠1` (min2/relax/prod). | Restraints are off there — editing has no effect. Single-stage → error; group → `skipped`. |
+| `AMBIGUOUS_PARAM` | The param appears more than once in the target namelist. | Manual inspection — the engine refuses to guess. |
+| `NAMELIST_NOT_FOUND` | No `&cntrl` block / unterminated namelist. | Fix the file structure. |
+| `SELF_CHECK_FAILED` | Post-edit re-parse didn't read the rendered value. | Internal backstop — file untouched; report it (regex/format edge case). |
+
+## How it works
+
+Invocation (the agent makes ONE `exec` call):
+
+```
+python3 {baseDir}/scripts/wrapper.py --md-dir <copy> --stage <stage|group:...> --param <p> --value <v> [--dry-run]
+```
+
+1. **Validate** the param + value (bounds) before touching any file — fail fast, write nothing.
+2. **Render** the value canonically (pure function of param+value → idempotency).
+3. **Resolve** `--stage` to file(s) via an explicit map (groups included).
+4. **Plan each file's edit in memory** (no writes yet): scope to the `&cntrl` block, replace
+   only the numeric token by index-slice; for `temp0` in an `nmropt=1` stage, also set the
+   `&wt TEMP0` `value2`; then **self-check** by re-parsing with the independent vendored parser.
+5. **Commit all-or-nothing:** if any file hard-errors, write nothing. Otherwise write each
+   changed file atomically (`.tmp` + `os.replace`) and append `{ts, file, namelist.param,
+   old → new}` to `mdin-edit.log`.
+
+`--dry-run` performs 1–4 (including the self-check) and prints the plan, but never writes or
+logs.
+
+## Guarantees — how mistakes are avoided (Task 4 summary)
+
+The whole point of this skill is to *never make a silent mistake* (the
+`antechamber-aromatic-kekulize-bug` lesson). Concretely:
+
+- **Predictable / idempotent:** value rendering depends only on `(param, value)`, not the
+  current token, so running an edit any number of times converges to one byte-identical
+  result. Acceptance case 2 proves byte-identity on re-run.
+- **Byte-minimal:** only the numeric token is rewritten — a left word-boundary stops
+  `restraint_wt` vs `restraintmask` collisions, and matching only the number leaves the
+  sibling `value1`, the comma, and comments untouched (acceptance cases 5/7).
+- **Stage-aware:** a parameter that doesn't belong in a stage is refused, never appended
+  (case 4); restraint edits where `ntr=0` are refused/skipped (case 7b/7c).
+- **In-bounds:** out-of-range values are rejected before any write (case 3).
+- **Consistent ramps:** the heat-3 `temp0`/`&wt value2` class of bug is fixed automatically
+  by the coupling (case 5).
+- **Self-checked + atomic:** the result is re-parsed and asserted before an atomic write, so
+  a half-written or wrong-span edit cannot reach disk.
+- **Recorded:** every applied change is logged with old → new.
+
+## Acceptance test
+
+`bash test_acceptance.sh` runs on FRESH copies of the demo set and asserts the actual edited
+**bytes** (never just `ok:true`):
+
+0. **Malformed** — unterminated namelist → graceful `ok:false` (`NAMELIST_NOT_FOUND`), file untouched.
+1. **Golden** — `dt → 0.001` in heat-1 (advisor example #1); exactly one line changes.
+2. **Idempotency** — re-run is byte-identical; re-run reports `unchanged`; trailing newline intact.
+3. **Out-of-bounds** — `dt = 0.01` rejected; file unchanged (no half-write).
+4. **Wrong-param** — `dt` on min1 rejected; `dt` still absent (no append).
+5. **Ext-A** — `temp0 → 310` `group:third-onward`: heat-3 `value2` coupled (value1 preserved),
+   relax/prod get no `&wt`, heat-1/2 + press-1 untouched, heat-3 mismatch WARN gone. **5b**
+   exercises the coupling rewrite (`temp0 → 305` → `value2 = 305.0`).
+6. **Ext-B** — `cut → 7.0`: `ok:true` despite the validator's <8 Å FAIL, with a deliberate WARN.
+7. **Ext-C** — `restraint_wt 5.0 → 1.0` on press-1 (mask line intact); **7b** negative on relax
+   (ntr=0) rejected; **7c** `group:all` skips the ntr=0 files and edits the rest.
+
+Run `bash test_acceptance.sh --dry-run` for the plan-only smoke (no toolchain needed).
+
+## Deferred (follow-up)
+
+- **`--submit`** — copy `submit.sh` + topology, rewrite the hardcoded `AMBERHOME` to the local
+  toolchain (`scripts/env.sh`), reduce `nstlim` via this same engine, and run a smoke to prove
+  the edited inputs run locally. (Designed; not built this session.)
+- **Live NL drive** — exercising the agent's NL → `--stage/--param/--value` mapping via
+  `openclaw agent`.
+
+## References
+
+`references/mdin-params.md` — the §23.6-grounded per-stage parameter write-up (advisor Task 1).
+`references/heuristics.md` — design rationale (idempotency, bounds, `&wt` coupling, cut policy)
+and the vendored-validator provenance.
