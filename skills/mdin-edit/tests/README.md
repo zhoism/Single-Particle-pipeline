@@ -73,3 +73,9 @@ for the coupled `&wt value2` (heat-3 `temp0=300` still edits `value2` 310→300)
 Oracle self-test 38/38 · Tier-1 ~240k assertions, 0 failures, full status+code
 coverage · mutation 8/8 · edit→run smoke 10/10 stages · under conda 3.11 + system
 3.14.
+
+**Overnight run 2026-06-08→09 (7.2 h, 161 iters):** 491 checks, **0 failures**
+(see `last-overnight-summary.json`). 161 fuzz runs with fresh seeds (~97k extra
+unique assertions) + 161 full edit→run pmemd chains (≈1,610 MD stage runs, all
+normal termination) + the existing suites/happy-path looped — no flakiness, no
+nondeterminism, no regressions.

@@ -1,0 +1,51 @@
+{
+  "checks": {
+    "acc_ambmd": {
+      "pass": 33,
+      "fail": 0
+    },
+    "acc_antech": {
+      "pass": 33,
+      "fail": 0
+    },
+    "acc_cpptraj": {
+      "pass": 17,
+      "fail": 0
+    },
+    "acc_mdin": {
+      "pass": 33,
+      "fail": 0
+    },
+    "acc_tleap": {
+      "pass": 33,
+      "fail": 0
+    },
+    "fuzz": {
+      "pass": 161,
+      "fail": 0
+    },
+    "gate_mutation": {
+      "pass": 1,
+      "fail": 0
+    },
+    "gate_oracle": {
+      "pass": 1,
+      "fail": 0
+    },
+    "gate_tier1": {
+      "pass": 1,
+      "fail": 0
+    },
+    "happy_path": {
+      "pass": 17,
+      "fail": 0
+    },
+    "smoke": {
+      "pass": 161,
+      "fail": 0
+    }
+  },
+  "total_pass": 491,
+  "total_fail": 0,
+  "failures": []
+}
