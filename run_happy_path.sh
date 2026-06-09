@@ -57,7 +57,7 @@ on_exit() {  # post a failure notice on any non-zero exit that didn't reach succ
   local rc=$?
   [ -n "$NOTIFY_CHANNEL" ] || return 0
   if [ "$rc" -ne 0 ] && [ "$DONE_OK" -eq 0 ]; then
-    notify "❌ Run ${RUN_ID} failed at: ${FAIL_MSG:-$CUR_STAGE} (rc=${rc}; log: ${OUT}/run.log)"
+    notify "❌ Run ${RUN_ID} failed at: ${FAIL_MSG:-$CUR_STAGE} (rc=${rc}; outputs + log under ${OUT})"
   fi
 }
 trap on_exit EXIT

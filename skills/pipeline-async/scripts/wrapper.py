@@ -74,7 +74,9 @@ def main():
 
     outdir = Path(args.output_dir).expanduser().resolve() if args.output_dir \
         else ROOT / f"pipeline-async-run-{run_id}"
-    log = outdir / "run.log"
+    # Log lives BESIDE outdir, not inside it: run_happy_path.sh does `rm -rf $OUT`
+    # at startup, which would unlink a log placed inside.
+    log = outdir.parent / (outdir.name + ".log")
 
     # Preflight: the spine + helper must exist (the toolchain itself is sourced
     # by env.sh inside the detached job and validated stage-by-stage there).
@@ -89,7 +91,11 @@ def main():
         f"NOTIFY_CHANNEL={shlex.quote(args.channel)} RUN_ID={shlex.quote(run_id)} "
         f"bash {shlex.quote(str(RUN_HAPPY))} {args.sim_ps} {shlex.quote(str(outdir))}"
     )
-    launch = ["bash", "-lc", inner]
+    # NON-login shell: a login shell (-l) sources the user's profile, which here
+    # switches node to a non-nvm version and breaks `openclaw` (the LLM-free
+    # notify path). `bash -c` inherits the gateway's correct node + PATH; env.sh
+    # adds the AMBER toolchain.
+    launch = ["bash", "-c", inner]
 
     outputs = {
         "outdir": str(outdir),

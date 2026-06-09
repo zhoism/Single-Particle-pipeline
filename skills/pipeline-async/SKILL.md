@@ -4,7 +4,7 @@ description: "Run the FULL local AMBER MD pipeline (ligand prep -> topology -> M
 license: MIT
 homepage: https://github.com/zhoism/Single-Particle
 compatibility: Requires the prime-amber toolchain (sourced via scripts/env.sh by the detached job) + a working OpenClaw Discord channel for notifications.
-metadata: {"openclaw":{"requires":{"env":["AMBERHOME"]},"os":["darwin"]},"requires":{"bins":["bash","python3"],"env":["AMBERHOME"]},"inputs":{"sim_ps":"production length in ps (int, default 50)","channel":"Discord channel id to notify (default project channel)","run_id":"run label (default timestamp)","output_dir":"results dir (default ROOT/pipeline-async-run-<run_id>)"},"outputs":{"run_id":"label","status":"launched|planned","outdir":"path","log":"<outdir>/run.log"},"dry_run":true,"source":"project-prime/skills/pipeline-async","stage":"PhaseB.async"}
+metadata: {"openclaw":{"requires":{"env":["AMBERHOME"]},"os":["darwin"]},"requires":{"bins":["bash","python3"],"env":["AMBERHOME"]},"inputs":{"sim_ps":"production length in ps (int, default 50)","channel":"Discord channel id to notify (default project channel)","run_id":"run label (default timestamp)","output_dir":"results dir (default ROOT/pipeline-async-run-<run_id>)"},"outputs":{"run_id":"label","status":"launched|planned","outdir":"path","log":"<outdir>.log"},"dry_run":true,"source":"project-prime/skills/pipeline-async","stage":"PhaseB.async"}
 ---
 
 # pipeline-async
@@ -54,7 +54,7 @@ After launch, the channel receives (from the detached job, via `openclaw message
 
 ## How it works
 
-`{baseDir}/scripts/wrapper.py` validates inputs, then launches `run_happy_path.sh` in a **new session** (`start_new_session=True`) so it survives the wrapper — and the agent's `exec` — exiting. The detached command is `source scripts/env.sh && NOTIFY_CHANNEL=<id> RUN_ID=<id> bash run_happy_path.sh <ps> <outdir>`, with stdout/stderr → `<outdir>/run.log`. The wrapper itself touches no AMBER binary, so it returns in well under a second; the toolchain is bootstrapped by `scripts/env.sh` inside the detached job and validated stage-by-stage by the spine. `run_happy_path.sh` only notifies when `NOTIFY_CHANNEL` is set, so its plain (verification-spine) behavior is unchanged.
+`{baseDir}/scripts/wrapper.py` validates inputs, then launches `run_happy_path.sh` in a **new session** (`start_new_session=True`) so it survives the wrapper — and the agent's `exec` — exiting. The detached command (a NON-login `bash -c`, so the user's profile can't switch node and break the LLM-free `openclaw` notify path) is `source scripts/env.sh && NOTIFY_CHANNEL=<id> RUN_ID=<id> bash run_happy_path.sh <ps> <outdir>`, with stdout/stderr → a sibling `<outdir>.log` (outside the dir `run_happy_path.sh` wipes). The wrapper itself touches no AMBER binary, so it returns in well under a second; the toolchain is bootstrapped by `scripts/env.sh` inside the detached job and validated stage-by-stage by the spine. `run_happy_path.sh` only notifies when `NOTIFY_CHANNEL` is set, so its plain (verification-spine) behavior is unchanged.
 
 ## Errors
 
