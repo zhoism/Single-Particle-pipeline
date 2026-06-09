@@ -313,7 +313,10 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
     """Compute (in memory) the edit for one file. Writes NOTHING. Encodes expected
     conditions as status/reason on the result rather than raising."""
     name = path.name
-    text = path.read_text(newline="")  # newline="" preserves CRLF/LF exactly (byte-minimal)
+    # builtin open(newline="") preserves CRLF/LF exactly (byte-minimal) AND works on
+    # Python 3.11 — the conda env OpenClaw runs (Path.read_text(newline=) is 3.13+).
+    with open(path, "r", newline="") as _fh:
+        text = _fh.read()
 
     if cntrl_span(text) is None:
         return FileResult(name, "error", reason="NAMELIST_NOT_FOUND: no &cntrl block")
@@ -506,7 +509,8 @@ def main() -> None:
     for r in results:
         if r.status == "edited" and r.new_text is not None:
             tmp = md_dir / f".{r.file}.mdin-edit.tmp"
-            tmp.write_text(r.new_text, newline="")  # preserve exact line endings
+            with open(tmp, "w", newline="") as _fh:  # preserve exact line endings (3.11-safe)
+                _fh.write(r.new_text)
             os.replace(tmp, md_dir / r.file)
             for e in r.edits:
                 if e["changed"]:
