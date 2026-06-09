@@ -32,6 +32,8 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -393,6 +395,190 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
     return res
 
 
+# ---- Submit: prove the (already-edited) mdin set runs locally ------------
+#
+# This productizes tests/smoke_edit_run.sh: take a COPY (possibly already
+# edited), scratch-copy it, rewrite the advisor's hardcoded AMBERHOME to source
+# the local toolchain, reduce nstlim via THIS engine, smoke-accelerate the
+# out-of-scope min/heat lengths, then run the advisor's min1..prod pmemd chain
+# (restart-chained) to normal termination. It does NOT mutate --md-dir.
+
+# Files a --submit run needs in --md-dir (the 10 stages + topology + driver).
+SUBMIT_REQUIRED = (["complex.parm7", "complex.rst7", "submit.sh"]
+                   + [STAGE_FILES[s] for s in STAGE_FILES])
+
+# Chain order + restart-coordinate source — lifted verbatim from the advisor's
+# submit.sh (see tests/smoke_edit_run.sh). Each stage restarts from the prior.
+SUBMIT_CHAIN = [
+    ("min1", "complex.rst7"), ("min2", "min1.rst7"),
+    ("heat-1", "min2.rst7"), ("press-1", "heat-1.rst7"),
+    ("heat-2", "press-1.rst7"), ("press-2", "heat-2.rst7"),
+    ("heat-3", "press-2.rst7"), ("press-3", "heat-3.rst7"),
+    ("relax", "press-3.rst7"), ("prod", "relax.rst7"),
+]
+MCBAR_FLOOR = 100  # MC barostat (mcbarint default) needs nstlim ≥ 100 for NPT.
+
+
+def _read(path: Path) -> str:
+    with open(path, "r", newline="") as fh:  # 3.11-safe; preserve line endings
+        return fh.read()
+
+
+def _write(path: Path, text: str) -> None:
+    with open(path, "w", newline="") as fh:
+        fh.write(text)
+
+
+def _rewrite_amberhome(submit_path: Path, env_sh: Path) -> None:
+    """Rewrite `export AMBERHOME=<advisor path>` → `source "<local env.sh>"`.
+    Same regex as tests/smoke_edit_run.sh — makes the driver foreign-path-clean."""
+    _write(submit_path,
+           re.sub(r'(?m)^\s*export\s+AMBERHOME=.*$',
+                  f'source "{env_sh}"', _read(submit_path)))
+
+
+def _smoke_accelerate(scratch: Path, nstlim: int) -> None:
+    """Trim params OUTSIDE mdin-edit's scope (maxcyc for min, &wt istep2 for heat)
+    so the smoke finishes in minutes. NOT part of the edit contract — smoke-only;
+    rewrites only the integer, preserving indentation/spacing."""
+    for name in ("min1.in", "min2.in"):
+        p = scratch / name
+        _write(p, re.sub(r'(?m)(^\s*maxcyc\s*=\s*)\d+', rf'\g<1>{nstlim}', _read(p)))
+    for name in ("heat-1.in", "heat-2.in", "heat-3.in"):
+        p = scratch / name
+        _write(p, re.sub(r'(?m)(^\s*istep2\s*=\s*)\d+', rf'\g<1>{nstlim}', _read(p)))
+
+
+def _cleanup(parent: Path, keep: bool) -> None:
+    if not keep:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def run_submit(md_dir: Path, reduce_nstlim: int, dry_run: bool, keep: bool) -> None:
+    skill_dir = Path(__file__).resolve().parent.parent       # skills/mdin-edit
+    prime_root = skill_dir.parent.parent                     # project-prime
+    env_sh = prime_root / "scripts" / "env.sh"
+    validator = skill_dir / "scripts" / "check_amber_vendored.py"
+    self_path = Path(__file__).resolve()
+
+    # 1. Validate inputs — fail fast, touch nothing.
+    if not md_dir.is_dir():
+        emit_and_exit(ok=False, dry_run=dry_run, code=1,
+                      errors=[f"MD_DIR_NOT_FOUND: {md_dir}"])
+    if not env_sh.is_file():
+        emit_and_exit(ok=False, dry_run=dry_run, code=1,
+                      errors=[f"ENV_SH_NOT_FOUND: {env_sh}"])
+    missing = [f for f in SUBMIT_REQUIRED if not (md_dir / f).is_file()]
+    if missing:
+        emit_and_exit(ok=False, dry_run=dry_run, code=1,
+                      errors=[f"SUBMIT_INPUTS_MISSING: {missing}"])
+    if reduce_nstlim < MCBAR_FLOOR:
+        emit_and_exit(ok=False, dry_run=dry_run, code=1,
+                      errors=[f"REDUCE_NSTLIM_TOO_SMALL: {reduce_nstlim} < "
+                              f"{MCBAR_FLOOR} (MC barostat floor for NPT)"])
+
+    # 2. Scratch copy — the caller's COPY is never mutated by rewrite/accel/run.
+    scratch_parent = Path(tempfile.mkdtemp(prefix="mdin-submit-"))
+    scratch = scratch_parent / "run"
+    shutil.copytree(md_dir, scratch)
+    print(f"[submit] scratch: {scratch} (reduce_nstlim={reduce_nstlim})",
+          file=sys.stderr)
+
+    try:
+        # 3. AMBERHOME rewrite + foreign-path-clean assertion (vendored detector).
+        submit_sh = scratch / "submit.sh"
+        _rewrite_amberhome(submit_sh, env_sh)
+        vproc = subprocess.run([sys.executable, str(validator), str(submit_sh)],
+                               capture_output=True, text=True)
+        foreign_clean = "hardcoded foreign path" not in (vproc.stdout + vproc.stderr)
+        if not foreign_clean:
+            _cleanup(scratch_parent, keep)
+            emit_and_exit(ok=False, dry_run=dry_run, code=3,
+                          errors=["SUBMIT_PATH_NOT_CLEAN: submit.sh still has a "
+                                  "foreign hardcoded path after rewrite"])
+
+        # 4. Reduce nstlim via THIS wrapper (subprocess-to-self → exact tested edit path).
+        red = subprocess.run(
+            [sys.executable, str(self_path), "--md-dir", str(scratch),
+             "--stage", "group:all", "--param", "nstlim", "--value",
+             str(reduce_nstlim)], capture_output=True, text=True)
+        try:
+            red_ok = json.loads(red.stdout).get("ok", False)
+        except Exception:
+            red_ok = False
+        if not red_ok:
+            _cleanup(scratch_parent, keep)
+            emit_and_exit(ok=False, dry_run=dry_run, code=3,
+                          errors=[f"NSTLIM_REDUCE_FAILED: "
+                                  f"{(red.stdout or red.stderr).strip()[:300]}"])
+
+        # 5. Smoke-accelerate the out-of-scope min/heat lengths.
+        _smoke_accelerate(scratch, reduce_nstlim)
+
+        outputs: dict[str, Any] = {
+            "mode": "submit",
+            "md_dir": str(md_dir),
+            "scratch_dir": str(scratch),
+            "reduce_nstlim": reduce_nstlim,
+            "chain": [s for s, _ in SUBMIT_CHAIN],
+        }
+        validation = {"submit_script": {"foreign_path_clean": foreign_clean}}
+
+        # 6. Dry-run → report the plan; run no pmemd, need no toolchain.
+        if dry_run:
+            outputs["stages"] = [{"stage": s, "restart_from": c, "planned": True}
+                                 for s, c in SUBMIT_CHAIN]
+            _cleanup(scratch_parent, keep)
+            emit_and_exit(ok=True, dry_run=True, outputs=outputs,
+                          validation=validation, errors=[], code=0)
+
+        # 7. Run the chain (restart-chained). A failed stage blocks the rest.
+        stage_results: list[dict[str, Any]] = []
+        all_ok = True
+        for st, coord in SUBMIT_CHAIN:
+            xflag = "" if st.startswith("min") else f"-x {st}.nc"
+            cmd = (f'source "{env_sh}" && cd "{scratch}" && '
+                   f'pmemd -O -i {st}.in -p complex.parm7 -c {coord} -ref {coord} '
+                   f'-o {st}.out -r {st}.rst7 {xflag}')
+            proc = subprocess.run(["bash", "-c", cmd],
+                                  capture_output=True, text=True)
+            rc = proc.returncode
+            out_path = scratch / f"{st}.out"
+            abnormal = (out_path.is_file()
+                        and "terminated abnormally"
+                        in out_path.read_text(errors="ignore").lower())
+            rst = scratch / f"{st}.rst7"
+            rst_bytes = rst.stat().st_size if rst.is_file() else 0
+            normal = rc == 0 and not abnormal and rst_bytes > 0
+            stage_results.append({
+                "stage": st, "rc": rc, "normal_termination": normal,
+                "rst7": f"{st}.rst7" if rst_bytes > 0 else None,
+                "rst7_bytes": rst_bytes,
+            })
+            print(f"[submit]   {st} rc={rc} normal={normal} rst7={rst_bytes}B",
+                  file=sys.stderr)
+            if not normal:
+                all_ok = False
+                break
+
+        outputs["stages"] = stage_results
+        final = scratch / "prod.rst7"
+        outputs["final_rst7"] = (str(final)
+                                 if all_ok and final.is_file() else None)
+        errs = [] if all_ok else [
+            f"SUBMIT_STAGE_FAILED: {stage_results[-1]['stage']} "
+            f"(rc={stage_results[-1]['rc']})"]
+        # Keep the scratch on failure (for debugging) or when --keep is set.
+        _cleanup(scratch_parent, keep or not all_ok)
+        emit_and_exit(ok=all_ok, dry_run=False, outputs=outputs,
+                      validation=validation, errors=errs,
+                      code=0 if all_ok else 3)
+    except Exception as exc:  # never leave a scratch dir on an unexpected crash
+        _cleanup(scratch_parent, keep)
+        emit_and_exit(ok=False, dry_run=dry_run, code=3,
+                      errors=[f"SUBMIT_EXCEPTION: {exc}"])
+
+
 # ---- Main ----------------------------------------------------------------
 
 def main() -> None:
@@ -402,15 +588,40 @@ def main() -> None:
                     "AMBER mdin files — idempotent, bounds-checked, stage-aware.")
     p.add_argument("--md-dir", required=True,
                    help="Directory holding the mdin files (a COPY of the advisor's set).")
-    p.add_argument("--stage", required=True,
+    p.add_argument("--stage", default=None,
                    help="A stage (min1, heat-1, press-3, relax, prod, ...) or a "
-                        "group (group:third-onward, group:all).")
-    p.add_argument("--param", required=True,
-                   help=f"Parameter to edit: one of {sorted(SUPPORTED_PARAMS)}.")
-    p.add_argument("--value", required=True, help="New value (number).")
+                        "group (group:third-onward, group:all). Required unless --submit.")
+    p.add_argument("--param", default=None,
+                   help=f"Parameter to edit: one of {sorted(SUPPORTED_PARAMS)}. "
+                        "Required unless --submit.")
+    p.add_argument("--value", default=None,
+                   help="New value (number). Required unless --submit.")
     p.add_argument("--dry-run", action="store_true",
-                   help="Plan + validate the edit without writing or logging.")
+                   help="Plan + validate without writing/logging (or, with --submit, "
+                        "without running pmemd).")
+    p.add_argument("--submit", action="store_true",
+                   help="Run the (already-edited) mdin set locally: scratch-copy, rewrite "
+                        "AMBERHOME to the local toolchain, reduce nstlim, run the advisor's "
+                        "min1..prod pmemd chain to normal termination. Proves it runs.")
+    p.add_argument("--reduce-nstlim", type=int, default=120,
+                   help="nstlim for the --submit smoke (default 120; ≥100 for the MC barostat).")
+    p.add_argument("--keep", action="store_true",
+                   help="Keep the --submit scratch dir instead of deleting it.")
     args = p.parse_args()
+
+    # --- Submit mode: run the edited set locally (separate from the edit path). ---
+    if args.submit:
+        run_submit(Path(args.md_dir).resolve(), args.reduce_nstlim,
+                   args.dry_run, args.keep)
+        return
+
+    # Edit mode needs the full triplet.
+    missing = [n for n, v in (("--stage", args.stage), ("--param", args.param),
+                              ("--value", args.value)) if v is None]
+    if missing:
+        emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                      errors=[f"MISSING_REQUIRED_ARG: {missing} "
+                              "(required unless --submit)"])
 
     param = args.param.lower()
     raw = args.value.strip()

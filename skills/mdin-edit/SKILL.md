@@ -4,7 +4,7 @@ description: "Edit one parameter in one stage (or a stage-group) of a pre-prepar
 license: MIT
 homepage: https://github.com/zhoism/Single-Particle
 compatibility: Pure Python 3 (stdlib only). No AMBER binaries required to edit; AmberTools/pmemd only needed to later RUN the edited files.
-metadata: {"openclaw":{"requires":{"env":[]},"os":["darwin"]},"requires":{"bins":[],"env":[]},"inputs":{"md_dir":"path — a COPY of the advisor's mdin set","stage":"stage name | group:third-onward | group:all","param":"dt|cut|temp0|restraint_wt|nstlim","value":"number","dry_run":"flag"},"outputs":{"files":"per-stage edit records (old→new per namelist.param)","log":"<md_dir>/mdin-edit.log"},"validation":["idempotent_parse_replace_never_append","bounds_dt_cut_temp0_restraint_wt_nstlim","stage_aware_file_targeting","wt_temp0_value2_coupling","post_edit_self_check_reparse"],"dry_run":true,"source":"project-prime/skills/mdin-edit","stage":"Phase3.ParamEditor"}
+metadata: {"openclaw":{"requires":{"env":[]},"os":["darwin"]},"requires":{"bins":[],"env":[]},"inputs":{"md_dir":"path — a COPY of the advisor's mdin set","stage":"stage name | group:third-onward | group:all (required unless --submit)","param":"dt|cut|temp0|restraint_wt|nstlim (required unless --submit)","value":"number (required unless --submit)","dry_run":"flag","submit":"flag — run the edited set locally (min1..prod pmemd chain)","reduce_nstlim":"int, default 120 — nstlim for the --submit smoke","keep":"flag — keep the --submit scratch dir"},"outputs":{"files":"per-stage edit records (old→new per namelist.param)","log":"<md_dir>/mdin-edit.log","submit":"per-stage rc + normal_termination + final_rst7"},"validation":["idempotent_parse_replace_never_append","bounds_dt_cut_temp0_restraint_wt_nstlim","stage_aware_file_targeting","wt_temp0_value2_coupling","post_edit_self_check_reparse","submit_amberhome_rewrite_foreign_path_clean"],"dry_run":true,"source":"project-prime/skills/mdin-edit","stage":"Phase3.ParamEditor"}
 ---
 
 # mdin-edit
@@ -45,7 +45,10 @@ prepared.
 | `--stage` | string | yes | A stage (`min1`, `min2`, `heat-1…3`, `press-1…3`, `relax`, `prod`) **or** a group: `group:third-onward` = {heat-3, press-3, relax, prod}; `group:all` = all 10. |
 | `--param` | string | yes | One of `dt`, `cut`, `temp0`, `restraint_wt`, `nstlim`. |
 | `--value` | number | yes | The new value. Rendered canonically (`310` → `310.0` for float params; integer for `nstlim`). |
-| `--dry-run` | flag | no | Plan + validate the edit and print the would-be result; write nothing, log nothing. |
+| `--dry-run` | flag | no | Plan + validate the edit and print the would-be result; write nothing, log nothing. With `--submit`: plan the run (rewrite + reduce) but invoke no pmemd. |
+| `--submit` | flag | no | Run the **already-edited** set locally to prove it runs (separate mode; `--stage/--param/--value` not needed). See **Submit** below. |
+| `--reduce-nstlim` | int | no | `nstlim` for the `--submit` smoke (default `120`; `≥100` so the MC barostat is happy on the NPT stages). |
+| `--keep` | flag | no | Keep the `--submit` scratch dir instead of deleting it (scratch is also kept automatically on a stage failure). |
 
 ## Outputs
 
@@ -145,6 +148,30 @@ python3 {baseDir}/scripts/wrapper.py --md-dir <copy> --stage <stage|group:...> -
 `--dry-run` performs 1–4 (including the self-check) and prints the plan, but never writes or
 logs.
 
+## Submit — prove the edited set runs locally
+
+```
+python3 {baseDir}/scripts/wrapper.py --md-dir <COPY> --submit [--reduce-nstlim N] [--keep] [--dry-run]
+```
+
+`--submit` answers "does the set I just edited actually run?". It is a *separate* mode from the
+editor (no `--stage/--param/--value`), and it **never mutates `--md-dir`** — it works on its own
+scratch copy. On that scratch it:
+
+1. **Rewrites** the advisor's hardcoded `export AMBERHOME=…` in `submit.sh` to `source` the local
+   toolchain (`scripts/env.sh`), then asserts the result is foreign-path-clean (vendored detector).
+2. **Reduces** `nstlim` to `--reduce-nstlim` (default 120) on all stages via this same engine
+   (subprocess-to-self → the exact tested edit path), and trims the out-of-scope min/heat lengths
+   (`maxcyc`, `&wt istep2`) so the smoke finishes in minutes — *those trims are smoke-only, not part
+   of the edit contract*.
+3. **Runs** the advisor's `min1 … prod` pmemd chain restart-chained (each stage `-c` the prior
+   `.rst7`), asserting per stage: `rc==0`, no "Terminated Abnormally", non-empty `.rst7`.
+
+The envelope reports `outputs.mode:"submit"`, a per-stage list (`rc`, `normal_termination`,
+`rst7_bytes`), and `final_rst7`; `ok` is true only if all ten stages reach normal termination.
+`--submit --dry-run` does steps 1–2 and reports the plan without invoking pmemd (no toolchain
+needed — good for CI). This productizes `tests/smoke_edit_run.sh`.
+
 ## Guarantees — how mistakes are avoided (Task 4 summary)
 
 The whole point of this skill is to *never make a silent mistake* (the
@@ -184,13 +211,15 @@ The whole point of this skill is to *never make a silent mistake* (the
 
 Run `bash test_acceptance.sh --dry-run` for the plan-only smoke (no toolchain needed).
 
+`bash tests/submit_acceptance.sh` proves the `--submit` mode: it edits a fresh copy, runs
+`--submit --reduce-nstlim 120` (10/10 stages to normal termination, `final_rst7` present), and
+checks the `--submit --dry-run` plan (no toolchain). `tests/smoke_edit_run.sh` remains the
+independent end-to-end run oracle.
+
 ## Deferred (follow-up)
 
-- **`--submit`** — copy `submit.sh` + topology, rewrite the hardcoded `AMBERHOME` to the local
-  toolchain (`scripts/env.sh`), reduce `nstlim` via this same engine, and run a smoke to prove
-  the edited inputs run locally. (Designed; not built this session.)
 - **Live NL drive** — exercising the agent's NL → `--stage/--param/--value` mapping via
-  `openclaw agent`.
+  `openclaw agent` (verified by byte-comparing the agent's edit to the CLI baseline).
 
 ## References
 
