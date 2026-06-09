@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
@@ -138,6 +140,12 @@ class EditError(Exception):
 # An AMBER numeric literal (int, float, sci-notation, optional sign).
 VAL = r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?"
 
+# ASCII-only numeric grammar for INPUT validation (uses [0-9], NOT \d which also
+# matches unicode digits). Rejects 'inf'/'nan'/unicode/underscore/'0x..'/'' so the
+# downstream float()/int() never sees a non-finite or non-ASCII value (which would
+# otherwise crash int() or be silently coerced, e.g. '1_000'->1000, '０.００２'->0.002).
+_VAL_ASCII = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+
 
 def key_re(key: str) -> re.Pattern:
     r"""Match `<key> = <number>` capturing ONLY the numeric token in group 'val'.
@@ -181,8 +189,11 @@ def temp0_wt_span(text: str) -> Optional[tuple[int, int]]:
 
 
 def render_value(param: str, raw: str) -> str:
-    """Canonical rendering, PURE in (param, float(raw)) — independent of the
-    current token. This is what guarantees idempotency."""
+    """Canonical rendering, PURE in (param, raw) — independent of the current
+    token (this is what guarantees idempotency). Fractional floats render via
+    Decimal so the stored token faithfully round-trips the requested value with
+    NO exponent and NO precision loss (a plain %.Nf would silently truncate a
+    tiny dt like 2.55e-05)."""
     try:
         f = float(raw)
     except (ValueError, TypeError):
@@ -192,14 +203,13 @@ def render_value(param: str, raw: str) -> str:
             raise EditError("NONINTEGER_VALUE",
                             f"{param} requires an integer, got {raw!r}")
         return str(int(f))
-    # float param: integral -> 'N.0'; else shortest round-trippable decimal
-    if f == int(f):
-        return f"{int(f)}.0"
-    s = repr(f)
-    if "e" in s or "E" in s:  # avoid exponent form for our magnitude range
-        s = f"{f:.12f}".rstrip("0")
-        if s.endswith("."):
-            s += "0"
+    # float param: exact decimal of the input string, fixed-point, shortest form.
+    d = Decimal(raw)
+    if d == d.to_integral_value():
+        return f"{int(d)}.0"            # integral -> 'N.0'
+    s = format(d.normalize(), "f")      # fixed-point (no exponent), trailing zeros trimmed
+    if "." not in s:
+        s += ".0"
     return s
 
 
@@ -252,10 +262,14 @@ def parsed_wt_temp0_value2(text: str) -> Optional[str]:
 
 def bounds_verdict(param: str, raw: str) -> tuple[bool, Optional[str], list[str]]:
     """(ok, hard_error_msg, warnings). Pure value check, independent of any file."""
+    if not _VAL_ASCII.fullmatch(raw):
+        return False, f"INVALID_VALUE: {param}={raw!r} is not a plain ASCII decimal number", []
     try:
         v = float(raw)
-    except (ValueError, TypeError):
+    except (ValueError, OverflowError):
         return False, f"INVALID_VALUE: {param}={raw!r} is not a number", []
+    if not math.isfinite(v):
+        return False, f"INVALID_VALUE: {param}={raw!r} is not a finite number", []
     if param in INT_PARAMS and v != int(v):
         return False, f"NONINTEGER_VALUE: {param} must be an integer, got {raw!r}", []
     ok_fn, desc = HARD_BOUNDS[param]
@@ -299,7 +313,7 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
     """Compute (in memory) the edit for one file. Writes NOTHING. Encodes expected
     conditions as status/reason on the result rather than raising."""
     name = path.name
-    text = path.read_text()
+    text = path.read_text(newline="")  # newline="" preserves CRLF/LF exactly (byte-minimal)
 
     if cntrl_span(text) is None:
         return FileResult(name, "error", reason="NAMELIST_NOT_FOUND: no &cntrl block")
@@ -492,7 +506,7 @@ def main() -> None:
     for r in results:
         if r.status == "edited" and r.new_text is not None:
             tmp = md_dir / f".{r.file}.mdin-edit.tmp"
-            tmp.write_text(r.new_text)
+            tmp.write_text(r.new_text, newline="")  # preserve exact line endings
             os.replace(tmp, md_dir / r.file)
             for e in r.edits:
                 if e["changed"]:
