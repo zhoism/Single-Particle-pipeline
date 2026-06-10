@@ -1,0 +1,190 @@
+
+          -------------------------------------------------------
+          Amber 26 PMEMD                              2026
+          -------------------------------------------------------
+
+| PMEMD implementation of SANDER, Release 26
+
+|  Compiled date/time: Sun Apr 19 08:01:55 2026
+| Run on 06/10/2026 at 11:33:37
+
+|   Executable path: pmemd
+| Working directory: /Users/kevinzhou/Downloads/Single Particle/project-prime/recover-crashlab
+|          Hostname: Unknown
+| WARNING: Stack usage limited by a hard resource limit of   67092480 bytes!
+|          If segment violations occur, get your sysadmin to increase the limit.
+  [-O]verwriting output
+
+File Assignments:
+|   MDIN: unmin_heat.in                                                         
+|  MDOUT: unmin.out                                                             
+| INPCRD: comp_oct.crd                                                          
+|   PARM: comp_oct.top                                                          
+| RESTRT: unmin.rst                                                             
+|   REFC: refc                                                                  
+|  MDVEL: mdvel                                                                 
+|   MDEN: mden                                                                  
+|  MDCRD: mdcrd                                                                 
+| MDINFO: mdinfo                                                                
+|  MDFRC: mdfrc                                                                 
+
+
+ Here is the input file:
+
+unmin heat: physically-valid 2fs/SHAKE stage from raw un-minimized coords      
+ &cntrl                                                                        
+  imin=0, irest=0, ntx=1,                                                      
+  nstlim=2000, dt=0.002,                                                       
+  ntc=2, ntf=2, cut=9.0,                                                       
+  ntb=1, ntp=0,                                                                
+  ntt=3, gamma_ln=2.0, ig=314159,                                              
+  tempi=0.0, temp0=300.0,                                                      
+  ntpr=100, ntwx=0, ntwr=1000,                                                 
+ /                                                                             
+
+
+| irandom = 1, using AMBER's internal random number generator (default).
+| WARNING: ACES26 inputs require aces26 = 1. Ignoring ACES26 options.
+ 
+ 
+| Conditional Compilation Defines Used:
+| PUBFFT
+| BINTRAJ
+| EMIL
+
+| Largest sphere to fit in unit cell has radius =    18.574
+
+| New format PARM file being parsed.
+| Version =    1.000 Date = 06/09/26 Time = 22:21:51
+
+| Note: 1-4 EEL scale factors are being read from the topology file.
+
+| Note: 1-4 VDW scale factors are being read from the topology file.
+| Duplicated    0 dihedrals
+
+| Duplicated    0 dihedrals
+
+--------------------------------------------------------------------------------
+   1.  RESOURCE   USE: 
+--------------------------------------------------------------------------------
+
+ getting new box info from bottom of inpcrd
+ NATOM  =    5989 NTYPES =      18 NBONH =    5834 MBONA  =     159
+ NTHETH =     349 MTHETA =     216 NPHIH =     702 MPHIA  =     636
+ NHPARM =       0 NPARM  =       0 NNB   =    9274 NRES   =    1916
+ NBONA  =     159 NTHETA =     216 NPHIA =     636 NUMBND =      58
+ NUMANG =     129 NPTRA  =     125 NATYP =      31 NPHB   =       0
+ IFBOX  =       2 NMXRS  =      24 IFCAP =       0 NEXTRA =       0
+ NCOPY  =       0
+
+| Coordinate Index Table dimensions:     8    8    8
+| Direct force subcell size =     5.6872    5.6872    5.6872
+
+     BOX TYPE: TRUNCATED OCTAHEDRON
+
+--------------------------------------------------------------------------------
+   2.  CONTROL  DATA  FOR  THE  RUN
+--------------------------------------------------------------------------------
+
+default_name                                                                    
+
+General flags:
+     imin    =       0, nmropt  =       0
+
+Nature and format of input:
+     ntx     =       1, irest   =       0, ntrx    =       1
+
+Nature and format of output:
+     ntxo    =       2, ntpr    =     100, ntrx    =       1, ntwr    =    1000
+     iwrap   =       0, ntwx    =       0, ntwv    =       0, ntwe    =       0
+     ioutfm  =       1, ntwprt  =       0, idecomp =       0, rbornstat=      0
+
+Potential function:
+     ntf     =       2, ntb     =       1, igb     =       0, nsnb    =      25
+     ipol    =       0, gbsa    =       0, iesp    =       0
+     dielc   =   1.00000, cut     =   9.00000, intdiel =   1.00000
+
+Frozen or restrained atoms:
+     ibelly  =       0, ntr     =       0
+
+Molecular dynamics:
+     nstlim  =      2000, nscm    =      1000, nrespa  =         1
+     t       =   0.00000, dt      =   0.00200, vlimit  =  20.00000
+
+Langevin dynamics temperature regulation:
+     ig      =  314159
+     temp0   = 300.00000, tempi   =   0.00000, gamma_ln=   2.00000
+
+SHAKE:
+     ntc     =       2, jfastw  =       0
+     tol     =   0.00001
+
+| Intermolecular bonds treatment:
+|     no_intermolecular_bonds =       1
+
+| Energy averages sample interval:
+|     ene_avg_sampling =     100
+
+Ewald parameters:
+     verbose =       0, ew_type =       0, nbflag  =       1, use_pme =       1
+     vdwmeth =       1, eedmeth =       1, netfrc  =       1
+     Box X =   45.497   Box Y =   45.497   Box Z =   45.497
+     Alpha =  109.471   Beta  =  109.471   Gamma =  109.471
+     NFFT1 =   48       NFFT2 =   48       NFFT3 =   48
+     Cutoff=    9.000   Tol   =0.100E-04
+     Ewald Coefficient =  0.30768
+     Interpolation order =    4
+
+--------------------------------------------------------------------------------
+   3.  ATOMIC COORDINATES AND VELOCITIES
+--------------------------------------------------------------------------------
+
+default_name                                                                    
+ begin time read from input coords =     0.000 ps
+
+ 
+ Number of triangulated 3-point waters found:     1894
+
+     Sum of charges from parm topology file =  -0.00000001
+     Forcing neutrality...
+
+| Dynamic Memory, Types Used:
+| Reals              343454
+| Integers           202208
+
+| Nonbonded Pairs Initial Allocation:     1365492
+
+--------------------------------------------------------------------------------
+   4.  RESULTS
+--------------------------------------------------------------------------------
+
+ ---------------------------------------------------
+ APPROXIMATING switch and d/dx switch using CUBIC SPLINE INTERPOLATION
+ using   5000.0 points per unit in tabled values
+ TESTING RELATIVE ERROR over r ranging from 0.0 to cutoff
+| CHECK switch(x): max rel err =   0.3338E-14   at   2.509280
+| CHECK d/dx switch(x): max rel err =   0.8261E-11   at   2.768360
+ ---------------------------------------------------
+|---------------------------------------------------
+| APPROXIMATING direct energy using CUBIC SPLINE INTERPOLATION
+|  with   50.0 points per unit in tabled values
+| Relative Error Limit not exceeded for r .gt.   2.39
+| APPROXIMATING direct force using CUBIC SPLINE INTERPOLATION
+|  with   50.0 points per unit in tabled values
+| Relative Error Limit not exceeded for r .gt.   2.83
+|---------------------------------------------------
+
+ NSTEP =        0   TIME(PS) =       0.000  TEMP(K) =     0.00  PRESS =     0.0
+ Etot   = **************  EKtot   =         0.0000  EPtot      = **************
+ BOND   =        13.6426  ANGLE   =        65.3015  DIHED      =       113.7952
+ UB     =         0.0000  IMP     =         0.0000  CMAP       =        12.7410
+ 1-4 NB =        63.4712  1-4 EEL =       848.2814  VDWAALS    = **************
+ EELEC  =    -18817.6753  EHBOND  =         0.0000  RESTRAINT  =         0.0000
+ Ewald error estimate:   0.4344E-03
+ ------------------------------------------------------------------------------
+
+vlimit exceeded for step      0; vmax = **********
+
+     Coordinate resetting cannot be accomplished,
+     deviation is too large
+     iter_cnt, my_bond_idx, i and j are :       6      96      98      97

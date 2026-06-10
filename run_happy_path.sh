@@ -203,6 +203,9 @@ if [ -n "$NOTIFY_CHANNEL" ]; then ( set +e; md_progress_watch "$OUT/md" ) & WATC
 python3 "$MD" --top "$OCT" --crd "$OCTC" --output-dir "$OUT/md" \
   --sim-ps "$SIM_PS" --engine pmemd > "$OUT/s4.json" || true
 [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null || true
+# Stage 4b: bounded recovery (opt-in RECOVER=1; crash-only; non-fatal). On the
+# green happy path the MD never crashes, so this is a no-op and stays byte-green.
+{ [ "${RECOVER:-0}" = "1" ] && bash "$ROOT/scripts/recover_hook.sh" "$OUT/s4.json" "$OUT/md" "$RUN_ID"; } || true
 ok "$OUT/s4.json" "MD complete"
 TRAJ=$(jget "$OUT/s4.json" "['outputs']['traj']")
 WALL=$(jget "$OUT/s4.json" "['outputs'].get('wall_time_s')")
