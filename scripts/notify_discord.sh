@@ -29,7 +29,9 @@ if [ "${NOTIFY_DRYRUN:-0}" = "1" ]; then
   exit $?
 fi
 
-if ! "$OPENCLAW" "${args[@]}" >/dev/null 2>&1; then
-  echo "notify_discord: send failed (channel=$CHANNEL)" >&2
+# Capture the CLI's own output so a failure surfaces its real cause in the run log
+# (this path once hid a "Node.js v22.19+ required" error behind a generic message).
+if ! _ndout="$("$OPENCLAW" "${args[@]}" 2>&1)"; then
+  echo "notify_discord: send failed (channel=$CHANNEL): ${_ndout%%$'\n'*}" >&2
   exit 1
 fi

@@ -53,6 +53,31 @@ notify() {  # notify "<message>" ["<media>"] — never breaks the pipeline
   [ -n "$NOTIFY_CHANNEL" ] || return 0
   bash "$NOTIFY_SH" "$NOTIFY_CHANNEL" "$1" "${2:-}" || true
 }
+# MD sub-stage progress for notify mode: post each of the 6 MD steps as its
+# restart file lands (a step's <name>.rst is written only on success), with a
+# heartbeat every 2 min on the long ones so the channel is never silent during
+# the ~10-15 min MD. Backgrounded during Stage 4; killed when the stage returns.
+md_progress_watch() {
+  local md="$1" start now last i=0
+  local steps=(min1 min2 min3 heat density product)
+  local labels=("solvent-only minimization" "solvent+H minimization" \
+                "full-system minimization" "heating 0→300 K (NVT)" \
+                "density equilibration (NPT)" "production (NPT)")
+  start=$(date +%s); last=$start
+  while [ "$i" -lt 6 ]; do
+    if [ -s "$md/${steps[$i]}.rst" ]; then
+      now=$(date +%s)
+      notify "⚙️ [${RUN_ID}] MD step $((i+1))/6 ✓ — ${steps[$i]}: ${labels[$i]} (MD elapsed $(( now - start ))s)"
+      i=$(( i + 1 )); last=$now; continue
+    fi
+    now=$(date +%s)
+    if [ $(( now - last )) -ge 120 ]; then
+      notify "⏳ [${RUN_ID}] MD still running — on ${steps[$i]} (${labels[$i]}); $(( now - start ))s into the MD…"
+      last=$now
+    fi
+    sleep 5
+  done
+}
 on_exit() {  # post a failure notice on any non-zero exit that didn't reach success
   local rc=$?
   [ -n "$NOTIFY_CHANNEL" ] || return 0
@@ -64,10 +89,11 @@ trap on_exit EXIT
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 echo "Happy path on 1L2Y | sim_ps=$SIM_PS | out=$OUT" >&2
-notify "🚀 Run ${RUN_ID} started — full AMBER MD pipeline on 1L2Y, ${SIM_PS} ps production (~10–15 min). I'll post each stage here."
+notify "🚀 Run ${RUN_ID} started — full AMBER MD pipeline on 1L2Y · ${SIM_PS} ps production (~10–15 min). Plan: (1) ligand prep → (2) topology → (3) MD [min1·min2·min3·heat·density·production] → (4) analysis + MM-GBSA → (5) verify. I'll ping before & after each stage, and on every MD step."
 
 # ---- Stage 2: ligand parameterization ------------------------------------
 CUR_STAGE="Stage 2 (ligand prep)"
+notify "▶️ [${RUN_ID}] Stage 2/5 starting — ligand prep (antechamber: ligand → GAFF2 atom types + AM1-BCC charges)…"
 say "Stage 2 — antechamber-ligandprep (ligand -> GAFF2 mol2 + frcmod)"
 python3 "$AC" --input "$FIX/ligand.pdb" --name MOL --charge 0 \
   --output-dir "$OUT/prep" > "$OUT/s2.json" || true
@@ -78,6 +104,7 @@ notify "🧪 [${RUN_ID}] prep ✓ — ligand parameterized (GAFF2 atom types + A
 
 # ---- Stage 3: topology build ---------------------------------------------
 CUR_STAGE="Stage 3 (topology build)"
+notify "▶️ [${RUN_ID}] Stage 3/5 starting — topology build (tleap: protein + ligand → solvated octahedral box)…"
 say "Stage 3 — tleap-build (protein + ligand -> solvated topology)"
 python3 "$TL" --protein "$FIX/1L2Y-1.pdb" \
   --ligand-mol2 "$MOL2" --ligand-frcmod "$FRCMOD" --name MOL \
@@ -94,9 +121,13 @@ notify "🧬 [${RUN_ID}] topology ✓ — ${DRYN}/${SOLVN} atoms (dry/solvated c
 
 # ---- Stage 4: MD run ------------------------------------------------------
 CUR_STAGE="Stage 4 (MD run)"
+notify "▶️ [${RUN_ID}] Stage 4/5 starting — MD (6-step chain: min1·min2·min3·heat·density·production, ${SIM_PS} ps). This is the long one (~10-15 min); I'll post each step as it finishes."
 say "Stage 4 — amber-md-run (6-step chain, ${SIM_PS} ps production)"
+WATCH_PID=""
+if [ -n "$NOTIFY_CHANNEL" ]; then ( set +e; md_progress_watch "$OUT/md" ) & WATCH_PID=$!; fi
 python3 "$MD" --top "$OCT" --crd "$OCTC" --output-dir "$OUT/md" \
   --sim-ps "$SIM_PS" --engine pmemd > "$OUT/s4.json" || true
+[ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null || true
 ok "$OUT/s4.json" "MD complete"
 TRAJ=$(jget "$OUT/s4.json" "['outputs']['traj']")
 WALL=$(jget "$OUT/s4.json" "['outputs'].get('wall_time_s')")
@@ -105,6 +136,7 @@ notify "⚛️ [${RUN_ID}] MD ✓ — ${SIM_PS} ps production complete (wall ${W
 
 # ---- Stage 5: analysis ----------------------------------------------------
 CUR_STAGE="Stage 5 (analysis)"
+notify "▶️ [${RUN_ID}] Stage 5/5 starting — analysis (cpptraj: RMSD/RMSF/PCA/FEL/clustering/H-bonds + MM-GBSA ΔG)…"
 say "Stage 5 — cpptraj-analysis (full suite)"
 python3 "$AN" --comp-oct-top "$OCT" --comp-dry-top "$DRY" --traj "$TRAJ" \
   --protein-top "$PROT" --ligand-top "$LIG" --mdout-dir "$OUT/md" \
