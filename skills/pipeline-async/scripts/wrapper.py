@@ -89,11 +89,22 @@ def main():
              errors=[f"INVALID_INPUT: protein PDB not found: {args.protein}"], code=1)
     if args.ligand:
         lp = Path(args.ligand).expanduser()
-        # A recognized molecular extension must resolve to a real file; anything
-        # else is treated as an inline SMILES and passed through unchecked.
-        if lp.suffix.lower() in (".pdb", ".mol2", ".sdf") and not lp.is_file():
+        ext = lp.suffix.lower()
+        if ext in (".pdb", ".mol2", ".sdf"):
+            # A recognized molecular file must resolve to a real file.
+            if not lp.is_file():
+                emit(False, dry_run=args.dry_run, run_id=run_id,
+                     errors=[f"INVALID_INPUT: ligand file not found: {args.ligand}"], code=1)
+        elif ext in (".mol", ".sd", ".xyz", ".pdbqt", ".smi", ".smiles",
+                     ".inchi", ".ml2", ".cif", ".mae"):
+            # A molecular-file extension the pipeline can't consume — reject
+            # clearly instead of letting antechamber treat the path as a SMILES
+            # string and fail cryptically in obabel.
             emit(False, dry_run=args.dry_run, run_id=run_id,
-                 errors=[f"INVALID_INPUT: ligand file not found: {args.ligand}"], code=1)
+                 errors=[f"INVALID_INPUT: unsupported ligand file extension "
+                         f"({lp.name}); pass .pdb/.mol2/.sdf or an inline SMILES"],
+                 code=1)
+        # else: no molecular-file extension -> treat as an inline SMILES string.
     if not re.fullmatch(r"[A-Z0-9]{1,4}", args.name):
         emit(False, dry_run=args.dry_run, run_id=run_id,
              errors=[f"INVALID_INPUT: --name must be 1-4 uppercase letters/digits, "

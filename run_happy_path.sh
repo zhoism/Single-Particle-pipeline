@@ -93,6 +93,11 @@ case "$LIGAND" in
   *.pdb|*.PDB)   LIG_EXT="pdb" ;;
   *.mol2|*.MOL2) LIG_EXT="mol2" ;;
   *.sdf|*.SDF)   LIG_EXT="sdf" ;;
+  # Other molecular-file extensions the pipeline can't consume: reject with a
+  # clear message rather than letting antechamber treat the path as a SMILES
+  # string and fail cryptically in obabel (a typo'd path otherwise slips through).
+  *.mol|*.MOL|*.sd|*.SD|*.sdf.gz|*.xyz|*.XYZ|*.pdbqt|*.PDBQT|*.smi|*.SMI|*.smiles|*.inchi|*.InChI|*.ml2|*.mol2.gz|*.cif|*.CIF|*.mae|*.MAE)
+    die "ligand has an unsupported file extension (${LIGAND##*/}); pass .pdb/.mol2/.sdf or an inline SMILES string" ;;
 esac
 [ -z "$LIG_EXT" ] || [ -f "$LIGAND" ] || die "ligand file not found: $LIGAND"
 TARGET="$(basename "$PROTEIN")"; TARGET="${TARGET%.*}"
