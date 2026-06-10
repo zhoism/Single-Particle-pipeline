@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# run_happy_path.sh — end-to-end local AMBER MD pipeline on the 1L2Y fixture.
+# run_happy_path.sh — end-to-end local AMBER MD pipeline. Defaults to the 1L2Y
+# fixture; runs ANY protein + ligand via flags (--protein/--ligand/--charge/--name).
 #
 # Chains the four Stage-2..5 skills as deterministic wrappers:
 #   antechamber-ligandprep -> tleap-build -> amber-md-run -> cpptraj-analysis
@@ -10,9 +11,16 @@
 # performs the same chain conversationally; this script is what proves it green.
 #
 # Usage:
-#   bash run_happy_path.sh [SIM_PS] [OUTDIR]
-#     SIM_PS  production length in ps (default 100)
-#     OUTDIR  results dir (default ./happy-path-run)
+#   bash run_happy_path.sh [SIM_PS] [OUTDIR] [flags]
+#     SIM_PS         production length in ps (default 100; positional or --sim-ps)
+#     OUTDIR         results dir (default ./happy-path-run; positional or --output-dir)
+#   Flags (all optional; default to the 1L2Y fixture):
+#     --protein P    protein PDB path (default golden-path/1L2Y/1L2Y-1.pdb)
+#     --ligand  L    ligand as a .pdb/.mol2/.sdf file OR an inline SMILES string
+#                    (default golden-path/1L2Y/ligand.pdb)
+#     --charge  N    ligand net formal charge for AM1-BCC (int, default 0)
+#     --name    RES  ligand residue name, 1-4 uppercase alnum (default MOL)
+#   Legacy positional SIM_PS/OUTDIR still work (overnight.sh, pipeline-async).
 #
 # Requires: prime-amber conda env active OR AmberTools on PATH, and pmemd in
 # ~/Downloads/pmemd26/bin. Run with the env sourced, e.g.:
@@ -24,8 +32,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS="$ROOT/skills"
 FIX="$ROOT/golden-path/1L2Y"
-SIM_PS="${1:-100}"
-OUT="${2:-$ROOT/happy-path-run}"
 
 AC="$SKILLS/antechamber-ligandprep/scripts/wrapper.py"
 TL="$SKILLS/tleap-build/scripts/wrapper.py"
@@ -40,6 +46,56 @@ import json,sys; e=json.load(open(sys.argv[1]))
 sys.exit(0 if e.get("ok") else (print("  errors:",e.get("errors"),file=sys.stderr) or 1))
 PY
 echo "  ok: $2" >&2; }
+
+# ---- Target inputs: flags + legacy positional, default to the 1L2Y fixture --
+# Keeps no-arg / `run_happy_path.sh <ps> [outdir]` (overnight.sh, pipeline-async)
+# byte-green while allowing any --protein/--ligand/--charge/--name. bash 3.2:
+# no arrays under `set -u`; guard every `shift 2` so a value-less flag dies clean.
+PROTEIN=""; LIGAND=""; CHARGE="0"; LIGNAME="MOL"; SIM_PS=""; OUT=""; pos=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --protein)     [ $# -ge 2 ] || die "--protein requires a value";     PROTEIN="$2"; shift 2 ;;
+    --ligand)      [ $# -ge 2 ] || die "--ligand requires a value";      LIGAND="$2";  shift 2 ;;
+    --charge)      [ $# -ge 2 ] || die "--charge requires a value";      CHARGE="$2";  shift 2 ;;
+    --name)        [ $# -ge 2 ] || die "--name requires a value";        LIGNAME="$2"; shift 2 ;;
+    --sim-ps)      [ $# -ge 2 ] || die "--sim-ps requires a value";      SIM_PS="$2";  shift 2 ;;
+    --output-dir)  [ $# -ge 2 ] || die "--output-dir requires a value";  OUT="$2";     shift 2 ;;
+    -h|--help)     echo "usage: run_happy_path.sh [SIM_PS] [OUTDIR] [--protein P] [--ligand L|SMILES] [--charge N] [--name RES]" >&2; exit 0 ;;
+    --*)           die "unknown flag: $1" ;;
+    *)
+      pos=$((pos + 1))
+      case "$pos" in
+        1) [ -n "$SIM_PS" ] || SIM_PS="$1" ;;
+        2) [ -n "$OUT" ]    || OUT="$1" ;;
+        *) die "unexpected extra positional argument: $1" ;;
+      esac
+      shift ;;
+  esac
+done
+
+# Defaults (1L2Y fixture) — empty means "not supplied", so a flag and a
+# positional can't fight (the flag, parsed first, wins; the positional is skipped).
+PROTEIN="${PROTEIN:-$FIX/1L2Y-1.pdb}"
+LIGAND="${LIGAND:-$FIX/ligand.pdb}"
+SIM_PS="${SIM_PS:-100}"
+OUT="${OUT:-$ROOT/happy-path-run}"
+
+# Validate up front (clear `die`, not a cryptic downstream crash).
+echo "$SIM_PS"  | grep -Eq '^[0-9]+$' && [ "$SIM_PS" -gt 0 ] || die "--sim-ps must be a positive integer, got: $SIM_PS"
+echo "$CHARGE"  | grep -Eq '^-?[0-9]+$'    || die "--charge must be an integer, got: $CHARGE"
+echo "$LIGNAME" | grep -Eq '^[A-Z0-9]{1,4}$' || die "--name must be 1-4 uppercase letters/digits, got: $LIGNAME"
+[ -f "$PROTEIN" ] || die "protein PDB not found: $PROTEIN"
+# Ligand: a file with a recognized molecular extension MUST exist (else a typo'd
+# path is silently treated as SMILES by antechamber and fails cryptically in obabel).
+# Anything else (no known ext) is passed through as an inline SMILES string.
+LIG_EXT=""
+case "$LIGAND" in
+  *.pdb|*.PDB)   LIG_EXT="pdb" ;;
+  *.mol2|*.MOL2) LIG_EXT="mol2" ;;
+  *.sdf|*.SDF)   LIG_EXT="sdf" ;;
+esac
+[ -z "$LIG_EXT" ] || [ -f "$LIGAND" ] || die "ligand file not found: $LIGAND"
+TARGET="$(basename "$PROTEIN")"; TARGET="${TARGET%.*}"
 
 # ---- Optional Discord notifications (opt-in via NOTIFY_CHANNEL) ------------
 # When NOTIFY_CHANNEL is set, post progress to that Discord channel through the
@@ -88,14 +144,28 @@ on_exit() {  # post a failure notice on any non-zero exit that didn't reach succ
 trap on_exit EXIT
 
 rm -rf "$OUT" && mkdir -p "$OUT"
-echo "Happy path on 1L2Y | sim_ps=$SIM_PS | out=$OUT" >&2
-notify "🚀 Run ${RUN_ID} started — full AMBER MD pipeline on 1L2Y · ${SIM_PS} ps production (~10–15 min). Plan: (1) ligand prep → (2) topology → (3) MD [min1·min2·min3·heat·density·production] → (4) analysis + MM-GBSA → (5) verify. I'll ping before & after each stage, and on every MD step."
+
+# Stage inputs under bare names inside OUT — neutralizes spaces / odd chars in
+# user-supplied paths and gives the skills a predictable filename. The default
+# fixture is copied too, so the path is uniform (content is byte-identical).
+mkdir -p "$OUT/inputs"
+cp "$PROTEIN" "$OUT/inputs/protein.pdb"
+PROT_STAGED="$OUT/inputs/protein.pdb"
+if [ -n "$LIG_EXT" ]; then
+  cp "$LIGAND" "$OUT/inputs/ligand.$LIG_EXT"
+  LIG_FOR_AC="$OUT/inputs/ligand.$LIG_EXT"
+else
+  LIG_FOR_AC="$LIGAND"   # inline SMILES — antechamber's classifier handles it
+fi
+
+echo "Happy path on $TARGET | sim_ps=$SIM_PS | out=$OUT" >&2
+notify "🚀 Run ${RUN_ID} started — full AMBER MD pipeline on ${TARGET} · ${SIM_PS} ps production (~10–15 min). Plan: (1) ligand prep → (2) topology → (3) MD [min1·min2·min3·heat·density·production] → (4) analysis + MM-GBSA → (5) verify. I'll ping before & after each stage, and on every MD step."
 
 # ---- Stage 2: ligand parameterization ------------------------------------
 CUR_STAGE="Stage 2 (ligand prep)"
 notify "▶️ [${RUN_ID}] Stage 2/5 starting — ligand prep (antechamber: ligand → GAFF2 atom types + AM1-BCC charges)…"
 say "Stage 2 — antechamber-ligandprep (ligand -> GAFF2 mol2 + frcmod)"
-python3 "$AC" --input "$FIX/ligand.pdb" --name MOL --charge 0 \
+python3 "$AC" --input "$LIG_FOR_AC" --name "$LIGNAME" --charge "$CHARGE" \
   --output-dir "$OUT/prep" > "$OUT/s2.json" || true
 ok "$OUT/s2.json" "ligand prepped"
 MOL2=$(jget "$OUT/s2.json" "['outputs']['mol2']")
@@ -106,8 +176,8 @@ notify "🧪 [${RUN_ID}] prep ✓ — ligand parameterized (GAFF2 atom types + A
 CUR_STAGE="Stage 3 (topology build)"
 notify "▶️ [${RUN_ID}] Stage 3/5 starting — topology build (tleap: protein + ligand → solvated octahedral box)…"
 say "Stage 3 — tleap-build (protein + ligand -> solvated topology)"
-python3 "$TL" --protein "$FIX/1L2Y-1.pdb" \
-  --ligand-mol2 "$MOL2" --ligand-frcmod "$FRCMOD" --name MOL \
+python3 "$TL" --protein "$PROT_STAGED" \
+  --ligand-mol2 "$MOL2" --ligand-frcmod "$FRCMOD" --name "$LIGNAME" \
   --output-dir "$OUT/build" > "$OUT/s3.json" || true
 ok "$OUT/s3.json" "topology built"
 OCT=$(jget "$OUT/s3.json" "['outputs']['comp_oct_top']")

@@ -1,10 +1,10 @@
 ---
 name: pipeline-async
-description: "Run the FULL local AMBER MD pipeline (ligand prep -> topology -> MD -> analysis + MM-GBSA) on the 1L2Y demo system in the BACKGROUND, and report progress + results to the Discord channel. Returns immediately with a run id so a chat turn never blocks on the ~10-15 min run. Use when asked to 'run the (full) pipeline' / 'run the MD' over Discord."
+description: "Run the FULL local AMBER MD pipeline (ligand prep -> topology -> MD -> analysis + MM-GBSA) on a target system in the BACKGROUND, and report progress + results to the Discord channel. Defaults to the 1L2Y demo system; runs ANY protein + ligand via --protein/--ligand/--charge/--name. Returns immediately with a run id so a chat turn never blocks on the ~10-15 min run. Use when asked to 'run the (full) pipeline' / 'run the MD' (optionally 'on <protein> with <ligand>') over Discord."
 license: MIT
 homepage: https://github.com/zhoism/Single-Particle
 compatibility: Requires the prime-amber toolchain (sourced via scripts/env.sh by the detached job) + a working OpenClaw Discord channel for notifications.
-metadata: {"openclaw":{"requires":{"env":["AMBERHOME"]},"os":["darwin"]},"requires":{"bins":["bash","python3"],"env":["AMBERHOME"]},"inputs":{"sim_ps":"production length in ps (int, default 50)","channel":"Discord channel id to notify (default project channel)","run_id":"run label (default timestamp)","output_dir":"results dir (default ROOT/pipeline-async-run-<run_id>)"},"outputs":{"run_id":"label","status":"launched|planned","outdir":"path","log":"<outdir>.log"},"dry_run":true,"source":"project-prime/skills/pipeline-async","stage":"PhaseB.async"}
+metadata: {"openclaw":{"requires":{"env":["AMBERHOME"]},"os":["darwin"]},"requires":{"bins":["bash","python3"],"env":["AMBERHOME"]},"inputs":{"sim_ps":"production length in ps (int, default 50)","protein":"protein PDB path (default 1L2Y fixture)","ligand":"ligand .pdb/.mol2/.sdf file OR inline SMILES (default 1L2Y fixture)","charge":"ligand net formal charge (int, default 0)","name":"ligand residue name 1-4 uppercase alnum (default MOL)","channel":"Discord channel id to notify (default project channel)","run_id":"run label (default timestamp)","output_dir":"results dir (default ROOT/pipeline-async-run-<run_id>)"},"outputs":{"run_id":"label","status":"launched|planned","outdir":"path","log":"<outdir>.log"},"dry_run":true,"source":"project-prime/skills/pipeline-async","stage":"PhaseB.async"}
 ---
 
 # pipeline-async
@@ -24,6 +24,10 @@ Kick off the full local AMBER MD happy path on the 1L2Y demo system **in the bac
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `--sim-ps` | int | no (default `50`) | Production length in ps. |
+| `--protein` | path | no | Protein PDB. Defaults to the 1L2Y fixture. |
+| `--ligand` | path/str | no | Ligand `.pdb`/`.mol2`/`.sdf` file **or** an inline SMILES string. Defaults to the 1L2Y fixture ligand. |
+| `--charge` | int | no (default `0`) | Ligand net formal charge for AM1-BCC. |
+| `--name` | str | no (default `MOL`) | Ligand residue name (1-4 uppercase alnum). |
 | `--channel` | str | no | Discord channel id to notify (defaults to the project channel). |
 | `--run-id` | str | no | Run label; also names the output dir. Defaults to a timestamp. |
 | `--output-dir` | path | no | Results dir (default `project-prime/pipeline-async-run-<run_id>`). |
@@ -34,6 +38,14 @@ Kick off the full local AMBER MD happy path on the 1L2Y demo system **in the bac
 ```
 python3 {baseDir}/scripts/wrapper.py --sim-ps 50 --channel 1511130059061067858
 ```
+
+For an arbitrary target, add `--protein`/`--ligand` (+ `--charge`/`--name` as needed):
+
+```
+python3 {baseDir}/scripts/wrapper.py --sim-ps 50 --protein /abs/path/receptor.pdb --ligand /abs/path/lig.mol2 --charge 0 --name LIG
+```
+
+With no `--protein`/`--ligand`, the run falls back to the 1L2Y fixture (default).
 
 ## Outputs
 

@@ -19,6 +19,7 @@ notice, not a silent hang.
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -51,6 +52,15 @@ def main():
                     "report progress + results to a Discord channel.")
     p.add_argument("--sim-ps", type=int, default=50,
                    help="Production length in ps (default 50).")
+    p.add_argument("--protein", default=None,
+                   help="Protein PDB path (default: the 1L2Y fixture).")
+    p.add_argument("--ligand", default=None,
+                   help="Ligand .pdb/.mol2/.sdf file OR inline SMILES "
+                        "(default: the 1L2Y fixture ligand).")
+    p.add_argument("--charge", type=int, default=0,
+                   help="Ligand net formal charge for AM1-BCC (default 0).")
+    p.add_argument("--name", default="MOL",
+                   help="Ligand residue name, 1-4 uppercase alnum (default MOL).")
     p.add_argument("--channel", default=DEFAULT_CHANNEL,
                    help="Discord channel id to notify (default: project channel).")
     p.add_argument("--run-id", default=None,
@@ -72,6 +82,23 @@ def main():
              errors=[f"INVALID_INPUT: --sim-ps must be a positive int, got {args.sim_ps}"],
              code=1)
 
+    # Target validation — mirror run_happy_path.sh so a typo'd path fails as a
+    # JSON envelope here, not as a cryptic obabel error inside the detached job.
+    if args.protein and not Path(args.protein).expanduser().is_file():
+        emit(False, dry_run=args.dry_run, run_id=run_id,
+             errors=[f"INVALID_INPUT: protein PDB not found: {args.protein}"], code=1)
+    if args.ligand:
+        lp = Path(args.ligand).expanduser()
+        # A recognized molecular extension must resolve to a real file; anything
+        # else is treated as an inline SMILES and passed through unchecked.
+        if lp.suffix.lower() in (".pdb", ".mol2", ".sdf") and not lp.is_file():
+            emit(False, dry_run=args.dry_run, run_id=run_id,
+                 errors=[f"INVALID_INPUT: ligand file not found: {args.ligand}"], code=1)
+    if not re.fullmatch(r"[A-Z0-9]{1,4}", args.name):
+        emit(False, dry_run=args.dry_run, run_id=run_id,
+             errors=[f"INVALID_INPUT: --name must be 1-4 uppercase letters/digits, "
+                     f"got {args.name!r}"], code=1)
+
     outdir = Path(args.output_dir).expanduser().resolve() if args.output_dir \
         else ROOT / f"pipeline-async-run-{run_id}"
     # Log lives BESIDE outdir, not inside it: run_happy_path.sh does `rm -rf $OUT`
@@ -85,11 +112,24 @@ def main():
         emit(False, dry_run=args.dry_run, run_id=run_id,
              errors=[f"INPUT_PREP_FAILED: missing required file(s): {missing}"], code=2)
 
+    # Target flags: only appended when the user overrode a default, so a no-target
+    # launch is byte-identical to the pre-arbitrary-target detached command (and
+    # run_happy_path.sh falls back to its own 1L2Y fixture defaults).
+    target_flags = ""
+    if args.protein:
+        target_flags += f" --protein {shlex.quote(args.protein)}"
+    if args.ligand:
+        target_flags += f" --ligand {shlex.quote(args.ligand)}"
+    if args.charge != 0:
+        target_flags += f" --charge {args.charge}"
+    if args.name != "MOL":
+        target_flags += f" --name {shlex.quote(args.name)}"
+
     # The detached job: source the toolchain, set notify env, run the spine.
     inner = (
         f"source {shlex.quote(str(ENV_SH))} && "
         f"NOTIFY_CHANNEL={shlex.quote(args.channel)} RUN_ID={shlex.quote(run_id)} "
-        f"bash {shlex.quote(str(RUN_HAPPY))} {args.sim_ps} {shlex.quote(str(outdir))}"
+        f"bash {shlex.quote(str(RUN_HAPPY))} {args.sim_ps} {shlex.quote(str(outdir))}{target_flags}"
     )
     # NON-login shell: a login shell (-l) sources the user's profile, which here
     # switches node to a non-nvm version and breaks `openclaw` (the LLM-free
