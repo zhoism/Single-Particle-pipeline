@@ -236,10 +236,32 @@ PY
 
 echo -e "\nHAPPY PATH GREEN. Results in $OUT/analysis (open the .png files)." >&2
 
+# ---- Stage 6: PLIP interaction profile (non-fatal addendum) ---------------
+# Runs AFTER the pipeline's GREEN verdict is locked in, so a PLIP failure can
+# never regress the proven happy path. Enriches the result with the
+# protein-ligand interaction fingerprint (the differentiator past MM-GBSA).
+# Guarded by set +e and presence checks; default-1L2Y runs stay byte-green.
+PLIP_SUMMARY=""
+PL="$SKILLS/plip-profile/scripts/wrapper.py"
+if [ -f "$PL" ] && [ -n "${OCT:-}" ] && [ -n "${DRY:-}" ] && [ -n "${TRAJ:-}" ]; then
+  set +e
+  notify "🔬 [${RUN_ID}] Stage 6 — PLIP protein-ligand interaction profiling…"
+  say "Stage 6 — plip-profile (interaction fingerprint)"
+  python3 "$PL" --comp-oct-top "$OCT" --comp-dry-top "$DRY" --traj "$TRAJ" \
+    --name "$LIGNAME" --output-dir "$OUT/plip" > "$OUT/s6.json" 2>"$OUT/plip.err"
+  if [ "$(jget "$OUT/s6.json" "['ok']" 2>/dev/null)" = "True" ]; then
+    PLIP_SUMMARY=$(python3 -c "import json;d=json.load(open('$OUT/s6.json'))['outputs'];t=d['totals'];print(str(t['total_interactions'])+' interactions ('+', '.join(k+' '+str(v) for k,v in t['by_type'].items() if v)+')')" 2>/dev/null)
+    echo "  PLIP: ${PLIP_SUMMARY:-(profiled)}" >&2
+  else
+    echo "  PLIP profiling did not complete (non-fatal; see $OUT/plip.err)" >&2
+  fi
+  set -e
+fi
+
 # ---- Success notification -------------------------------------------------
 DG=$(jget "$OUT/s5.json" "['outputs']['mmgbsa_dG_kcal_mol']")
 NPROD=$(python3 -c "import json;print(len(json.load(open('$OUT/s5.json'))['outputs']['produced']))")
 PNG=$(find "$OUT/analysis" -iname '*rmsd*.png' 2>/dev/null | head -1)
 if [ -z "$PNG" ]; then PNG=$(find "$OUT/analysis" -iname '*.png' 2>/dev/null | head -1); fi
 DONE_OK=1
-notify "✅ Run ${RUN_ID} done — ${NPROD} analyses, MM-GBSA ΔG ${DG} kcal/mol. Full results in ${OUT}/analysis." "$PNG"
+notify "✅ Run ${RUN_ID} done — ${NPROD} analyses, MM-GBSA ΔG ${DG} kcal/mol${PLIP_SUMMARY:+ · PLIP ${PLIP_SUMMARY}}. Full results in ${OUT}/analysis." "$PNG"
