@@ -141,6 +141,31 @@ def prmtop_natom(top_path: Path) -> int | None:
         return None
 
 
+# Standard residue labels expected in a dry protein(+ligand) topology: the 20 AAs
+# + AMBER protonation / disulfide variants. Anything else in comp_dry that is NOT
+# the ligand is a stray crystallographic residue (cofactor / metal / buffer /
+# second ligand) that loadpdb silently absorbed.
+STD_RESIDUES = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    "HIE", "HID", "HIP", "CYX", "CYM", "ASH", "GLH", "LYN",
+}
+
+
+def residue_labels(top_path: Path) -> list[str] | None:
+    """Read the %FLAG RESIDUE_LABEL block from an AMBER prmtop. None on any parse
+    failure (callers treat None as 'could not verify')."""
+    try:
+        text = top_path.read_text()
+    except OSError:
+        return None
+    m = re.search(r"%FLAG RESIDUE_LABEL\s*\n%FORMAT\([^)]*\)\s*\n(.*?)(?=\n%FLAG)",
+                  text, re.S)
+    if not m:
+        return None
+    return m.group(1).split()
+
+
 # ---- leap.in generation --------------------------------------------------
 
 def build_leap_in(*, protein_pdb: str, ligand_mol2: str | None,
@@ -217,7 +242,8 @@ def parse_leap_log(log_path: Path) -> tuple[list[str], dict[str, Any]]:
 # ---- Validation ----------------------------------------------------------
 
 def validate(run_dir: Path, has_ligand: bool,
-             log_errors: list[str], log_info: dict[str, Any]
+             log_errors: list[str], log_info: dict[str, Any],
+             ligand_resname: str | None = None
              ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = list(log_errors)
     validation: dict[str, Any] = dict(log_info)
@@ -235,6 +261,27 @@ def validate(run_dir: Path, has_ligand: bool,
     oct_atoms = prmtop_natom(run_dir / "comp_oct.top")
     validation["dry_atoms"] = dry_atoms
     validation["solvated_atoms"] = oct_atoms
+
+    # Residue-identity gate: comp_dry must contain ONLY standard AAs + the ligand.
+    # A stray crystallographic residue (cofactor / metal / buffer / second ligand
+    # left in the input PDB) is absorbed by loadpdb and passes the atom-count
+    # invariants (it is counted in both topologies), then silently mis-shifts the
+    # downstream last-residue==ligand mask assumption -> wrong-but-green analysis.
+    labels = residue_labels(run_dir / "comp_dry.top")
+    if labels is not None:
+        allowed = set(STD_RESIDUES)
+        if ligand_resname:
+            allowed.add(ligand_resname.upper())
+        stray = sorted({r for r in labels if r.upper() not in allowed})
+        validation["nonstandard_residues"] = stray
+        if stray:
+            lig = f" ({ligand_resname})" if ligand_resname else ""
+            errors.append(
+                f"UNKNOWN_RESIDUE_IN_INPUT: comp_dry contains non-standard residue(s) "
+                f"{stray} that are neither a standard amino acid nor the ligand{lig}. "
+                "A stray crystallographic HETATM (cofactor / metal / buffer / second "
+                "ligand) left in the input PDB was silently absorbed and would corrupt "
+                "the analysis residue masks — remove or explicitly parameterize it.")
 
     # Steal #1 sanity test: a real dry topology is much smaller than solvated.
     # If dry >= solvated, comp_dry was saved after solvation (the upstream bug).
@@ -378,7 +425,8 @@ def main() -> None:
                       validation={}, errors=[], code=0)
 
     log_errors, log_info = parse_leap_log(run_dir / "leap.log")
-    validation, errors = validate(run_dir, has_ligand, log_errors, log_info)
+    validation, errors = validate(run_dir, has_ligand, log_errors, log_info,
+                                  ligand_resname=(args.name if has_ligand else None))
 
     def abspath(name: str) -> str:
         return str(run_dir / name)

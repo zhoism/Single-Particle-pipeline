@@ -714,4 +714,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # A deterministic wrapper must NEVER crash without an envelope (thesis clause f).
+    # detect_masks() reads --comp-dry-top before the input-existence gate, so a
+    # missing/unreadable topology would otherwise raise a bare traceback to an
+    # orchestrator. Last-resort guard -> graceful ok:false (mirrors md-planner).
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001
+        emit_and_exit(ok=False, dry_run=False,
+                      errors=[f"INVALID_INPUT: {type(e).__name__}: {e}"], code=1)

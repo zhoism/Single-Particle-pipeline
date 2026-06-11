@@ -12,12 +12,13 @@ set +u; source "$PROJECT_PRIME/scripts/env.sh" >/dev/null 2>&1; set -u
 pass(){ echo "PASS: $1" >&2; }
 fail(){ echo "FAIL: $1" >&2; exit 1; }
 
-# A: MD ok -> hook no-ops (no recovery)
+# A: completed CLEAN MD (real clean mdout) -> detector says no crash -> no-op
 A="$RUN/ok"; mkdir -p "$A/md"
+cp "$SKILL_DIR/tests/fixtures/clean_production.out" "$A/md/product.out"
 echo '{"ok":true,"errors":[]}' > "$A/s4.json"
 RECOVER=1 bash "$HOOK" "$A/s4.json" "$A/md" t-ok >/dev/null 2>&1
 [ ! -f "$A/s4b.json" ] || fail "A: hook ran on a healthy MD"
-pass "A: healthy MD -> hook no-op"
+pass "A: clean MD -> detector no-op"
 
 # C: crash present but RECOVER unset -> gate holds, no-op
 C="$RUN/disabled"; mkdir -p "$C/md"
@@ -51,4 +52,16 @@ assert e["outputs"]["tier"] in (1,2), e["outputs"].get("tier")
 PY
 pass "B: real crash + RECOVER=1 -> amber-recover dispatched & recovered (tier $(python3 -c "import json;print(json.load(open('$B/s4b.json'))['outputs']['tier'])"))"
 
-echo "[wiring] all 3 scenarios passed" >&2
+# D: amber-md-run reported ok:TRUE, but the mdout is silent NaN garbage (banner + rst).
+#    The STRONG deterministic detector (the M2 fix) catches it DESPITE the upstream ok
+#    flag — the silent-garbage class amber-recover exists to catch is now reachable.
+D="$RUN/silent_nan"; mkdir -p "$D/md"
+cp "$SRC/comp_oct.top" "$D/md/"; cp "$SRC/comp_oct.crd" "$D/md/"; cp "$SRC/min3.rst" "$D/md/"
+cp "$SKILL_DIR/tests/fixtures/crash_nan_silent_finished.out" "$D/md/heat.out"
+cp "$B/md/heat.in" "$D/md/heat.in"
+echo '{"ok":true,"errors":[]}' > "$D/s4.json"   # amber-md-run wrongly called it healthy
+RECOVER=1 bash "$HOOK" "$D/s4.json" "$D/md" t-nan 2>"$D/hook.err" || true
+[ -f "$D/s4b.json" ] || { cat "$D/hook.err" >&2; fail "D: detector missed the silent-NaN run (M2 hole reopened)"; }
+pass "D: silent-NaN run (amber-md-run ok:true) -> detector caught it + dispatched recovery"
+
+echo "[wiring] all 4 scenarios passed" >&2
