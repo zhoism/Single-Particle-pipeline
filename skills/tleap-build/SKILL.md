@@ -60,7 +60,7 @@ Single JSON envelope on stdout; stderr is per-step progress.
   "validation": {
     "dry_atoms": 306, "solvated_atoms": 6847,
     "protein_atoms": 290, "ligand_atoms": 16,
-    "waters_plus_ions_atoms": 6541, "residual_charge": 0.0
+    "waters_plus_ions_atoms": 6541, "net_charge_e": 0.0
   },
   "errors": []
 }
@@ -75,7 +75,9 @@ Single JSON envelope on stdout; stderr is per-step progress.
   fail with `Number of atoms … does not match`.
 - **`protein_atoms + ligand_atoms == dry_atoms`** — the combine invariant (only
   when a ligand is present).
-- `residual_charge` ≈ 0 after `addions2`.
+- **`net_charge_e` ≈ 0** — the built `comp_oct` net charge, summed structurally
+  from the prmtop `CHARGE` block (÷ 18.2223), not scraped from `leap.log`. PME
+  requires a net-neutral cell; `> 0.5 e` → `SYSTEM_NOT_NEUTRAL`.
 
 ## How it works
 
@@ -88,7 +90,8 @@ envelope:
 3. Generate `leap.in` with the load-bearing save order: components →
    `comp_dry` **before** `solvateoct` → solvate → neutralize → `comp_oct`.
 4. `tleap -f leap.in`.
-5. Validate via `leap.log` parsing + prmtop `NATOM` introspection.
+5. Validate via `leap.log` parsing + prmtop `NATOM`/`RESIDUE_LABEL`/`CHARGE`
+   introspection (atom counts, residue identity, net neutrality).
 
 The ligand is loaded as a **mol2** and renumbered automatically by `combine`, so
 the upstream brittle `sed` residue-collision hack is unnecessary.
@@ -102,7 +105,7 @@ the upstream brittle `sed` residue-collision hack is unnecessary.
 | `TLEAP_STEP_FAILED` | pdb4amber or tleap exited non-zero. | Inspect `<run_dir>/03_tleap.err` + `leap.log`. |
 | `DRY_TOPOLOGY_CONTAMINATED` | dry ≥ solvated atom count. | Save order regression — should never happen with this wrapper. |
 | `COMPONENT_ATOM_MISMATCH` | protein+ligand ≠ dry complex. | Bad combine; check ligand mol2 residue. |
-| `SYSTEM_NOT_NEUTRAL` | residual charge after addions2. | Check ligand net charge / counter-ion type. |
+| `SYSTEM_NOT_NEUTRAL` | comp_oct net charge (prmtop `CHARGE` block) > 0.5 e after addions2. | Check ligand net charge / counter-ion type. |
 
 ## References
 

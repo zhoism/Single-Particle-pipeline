@@ -141,6 +141,37 @@ def prmtop_natom(top_path: Path) -> int | None:
         return None
 
 
+# AMBER prmtop stores each per-atom charge pre-scaled by this factor; divide the
+# CHARGE-block sum by it to recover the system net charge in electron units.
+AMBER_CHARGE_SCALE = 18.2223
+
+
+def prmtop_net_charge(top_path: Path) -> float | None:
+    """Net charge (electrons) of an AMBER prmtop = sum(%FLAG CHARGE) / 18.2223.
+
+    Structural: reads the BUILT topology directly, so it is independent of
+    leap.log phrasing/path (the old log-regex neutrality gate was keyed off the
+    PRE-neutralization "unperturbed charge" line and never matched real runs).
+    Returns None on any parse failure (callers treat None as 'could not verify').
+    """
+    try:
+        text = top_path.read_text()
+    except OSError:
+        return None
+    m = re.search(r"%FLAG CHARGE\s*\n%FORMAT\([^)]*\)\s*\n(.*?)(?=\n%FLAG)",
+                  text, re.S)
+    if not m:
+        return None
+    toks = m.group(1).split()
+    if not toks:
+        return None
+    try:
+        scaled = [float(t) for t in toks]
+    except ValueError:
+        return None
+    return sum(scaled) / AMBER_CHARGE_SCALE
+
+
 # Standard residue labels expected in a dry protein(+ligand) topology: the 20 AAs
 # + AMBER protonation / disulfide variants. Anything else in comp_dry that is NOT
 # the ligand is a stray crystallographic residue (cofactor / metal / buffer /
@@ -232,10 +263,11 @@ def parse_leap_log(log_path: Path) -> tuple[list[str], dict[str, Any]]:
         m = re.search(r"Added\s+(\d+)\s+residues", s)
         if m:
             info.setdefault("solvent_residues_added", []).append(int(m.group(1)))
-        # residual charge after neutralization.
-        m = re.search(r"unperturbed charge:\s*(-?\d+\.\d+)", s)
-        if m:
-            info["residual_charge"] = float(m.group(1))
+        # NOTE: net neutrality is checked STRUCTURALLY from the comp_oct prmtop
+        # CHARGE block in validate() (prmtop_net_charge), NOT scraped here.
+        # leap.log's "unperturbed charge" line reports the PRE-neutralization
+        # charge and is path/phrasing-dependent, which made the old log-regex
+        # gate vacuous on every real run.
     return errors, info
 
 
@@ -305,10 +337,19 @@ def validate(run_dir: Path, has_ligand: bool,
                 f"COMPONENT_ATOM_MISMATCH: protein({p_atoms}) + "
                 f"ligand({l_atoms}) != dry complex({dry_atoms})")
 
-    # Residual charge after neutralization should be ~integer-zero.
-    rc = validation.get("residual_charge")
-    if rc is not None and abs(rc) > 0.5:
-        errors.append(f"SYSTEM_NOT_NEUTRAL: residual charge {rc} after addions2")
+    # Net charge of the BUILT solvated system, read STRUCTURALLY from the
+    # comp_oct prmtop CHARGE block (sum / 18.2223). PME requires a net-neutral
+    # cell; addions2 must bring this to ~0. This replaces a vacuous log-regex
+    # gate that never matched the skill's leap.log (it scraped the PRE-
+    # neutralization "unperturbed charge" line).
+    net_charge = prmtop_net_charge(run_dir / "comp_oct.top")
+    if net_charge is not None:
+        validation["net_charge_e"] = round(net_charge, 4)
+        if abs(net_charge) > 0.5:
+            errors.append(
+                f"SYSTEM_NOT_NEUTRAL: comp_oct net charge {net_charge:+.3f} e "
+                "after addions2 — PME requires a neutral cell; neutralization "
+                "did not bring the system to ~0")
 
     return validation, errors
 
