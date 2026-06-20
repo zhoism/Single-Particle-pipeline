@@ -54,6 +54,8 @@ work and validates its own output + a `test_acceptance.sh`. The LLM stays
 | `pipeline-async` | — | detached full-pipeline launch + LLM-free per-stage Discord progress. |
 | `mdin-edit` | — | natural-language parameter editor over an existing `mdin` set — idempotent, bounds-checked, stage-aware. |
 
+> Full per-feature catalog (every flag, mode, and guardrail, by section): **[`FEATURES.md`](FEATURES.md)**.
+
 ## Why deterministic gates (the thesis)
 
 Reliability comes from **cheap deterministic proxy invariants**, not from trusting
