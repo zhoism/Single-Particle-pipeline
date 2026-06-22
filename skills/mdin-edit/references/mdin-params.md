@@ -40,11 +40,24 @@ NPT equilibration; `prod` is the production run.
 atoms, let solvent and hydrogens move).
 
 **Parameter presence (what `mdin-edit` must know for stage-aware targeting):**
-- `dt`, `temp0`: the **8 MD stages only** (absent in min1/min2).
+- `dt`, `temp0`: the **8 MD stages only** (absent in min1/min2). `dt`'s cap is SHAKE-aware
+  (0.002 with `ntc=2,ntf=2`, else 0.001).
 - `cut`: all 10.
 - `restraint_wt`: **present in all 10** — but `0.0` with `ntr=0` (restraints OFF) in
   min2/relax/prod, and `5.0` with `ntr=1` (ON) in min1/heat-1/2/3/press-1/2/3.
+- `restraintmask`: present **only where `ntr=1`** (min1/heat/press). min2/relax/prod have NO
+  mask line — so `--enable-restraints` there must *insert* one.
+- `tempi`: heat-1/2/3 (ramp **start**, ≠ temp0) and relax/prod (constant-T, == temp0); absent
+  in min1/min2 and the press stages. Editing `temp0` couples `tempi` on relax/prod, never on
+  the heat stages.
+- `ntwx`/`ntpr`: trajectory/energy output frequency — `ntwx=0` (trajectory off) in heat/press,
+  `>0` in relax/prod. An `nstlim` edit reports the resulting frame counts and warns on
+  zero/sparse/non-multiple sampling.
 - `&wt` TEMP0 ramp: **heat-1/2/3 only**.
+
+See [[Research_Advisor_Feedback_mdin_edit]] for the chemistry rationale behind the
+SHAKE-aware `dt` cap, the `temp0`↔`tempi` coupling, the restraint transitions, and the
+`nstlim` output-schedule safety net (advisor feedback 2026-06-22).
 
 ## What each parameter means (Amber26 §23.6)
 

@@ -138,6 +138,19 @@ def run_subproc(md_dir, selector, param, value, dry=False) -> Result:
     return Result(env=env, code=p.returncode, stdout=p.stdout, stderr=p.stderr, crashed_detail=detail)
 
 
+def run_argv(md_dir, extra: list[str]) -> Result:
+    """Run the wrapper with arbitrary flags (for the restraint modes)."""
+    cmd = ["python3", str(WRAPPER), "--md-dir", str(md_dir)] + [str(x) for x in extra]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    env = None
+    detail = None
+    try:
+        env = json.loads(p.stdout)
+    except Exception:
+        detail = f"no JSON (rc={p.returncode}); stderr: {p.stderr.strip()[:300]}"
+    return Result(env=env, code=p.returncode, stdout=p.stdout, stderr=p.stderr, crashed_detail=detail)
+
+
 # ---- Scratch ------------------------------------------------------------
 
 GT = O.load_ground_truth()
@@ -161,14 +174,10 @@ def file_text(scratch: Path, stage: str) -> str:
 
 
 # ---- Expected per-file edit (allowed changes + must-equal) ---------------
+# Delegated to the oracle (single source of truth incl. the temp0→tempi coupling).
 
 def edit_expectation(stage: str, param: str, rendered: str):
-    allowed = {("cntrl", param)}
-    must = [("cntrl", param, rendered)]
-    if param == "temp0" and GT.wt_temp0[stage]:
-        allowed.add(("wt", "value2"))
-        must.append(("wt", "value2", rendered))
-    return allowed, must
+    return O.edit_expectation(stage, param, rendered, GT)
 
 
 # ---- The core comparator: engine vs spec + oracle -----------------------
@@ -231,16 +240,20 @@ def check_case(selector, param, value, scratch, *, also_sub=False):
                 REP.add(False, "ORACLE", f"{fn} [{rp}]: {e}", rp)
             REP.add(cur != orig, "BICOND_EDITED",
                     f"{fn} reported edited but bytes identical: {rp}", rp)
+            # Advisory-warning presence: cut-floor OR hot-dt OR nstlim-schedule. The
+            # oracle decides independently; the engine must agree exactly (no missing,
+            # no spurious).
+            expect_w = O.expected_warn_for_edit(st, param, str(value), exp.rendered, GT)
+            REP.add(bool(rec.get("warnings")) == expect_w, "WARN_PRESENCE",
+                    f"{fn} warn presence exp {expect_w} got {rec.get('warnings')}: {rp}", rp)
             if exp.warn_cut:
-                REP.add(bool(rec.get("warnings")), "CUT_WARN",
-                        f"{fn} cut in [6,8) but no editor warning: {rp}", rp)
                 v = env.get("validation", {}).get("per_file", {}).get(fn, {})
                 delib = any(f.get("deliberate") for f in v.get("findings", []))
                 REP.add(delib, "CUT_DELIBERATE",
                         f"{fn} cut<8 not marked deliberate (would block ok): {rp}", rp)
-            else:
-                REP.add(not rec.get("warnings"), "NO_SPURIOUS_WARN",
-                        f"{fn} unexpected warning {rec.get('warnings')}: {rp}", rp)
+            if param == "nstlim":
+                REP.add(rec.get("output_schedule") is not None, "SCHEDULE_PRESENT",
+                        f"{fn} nstlim edit missing output_schedule: {rp}", rp)
 
     # idempotency: re-run, expect byte-identical + 'unchanged' on previously-edited files
     after1 = {O.STAGE_FILE[s]: file_text(scratch, s) for s in O.STAGES}
@@ -534,6 +547,131 @@ def _expect_code(res: Result, code: str, label: str):
             f"{label}: expected {code}, got ok={res.env.get('ok')} errors={errs}")
 
 
+# ---- Tier 1f: dt cap depends on SHAKE (advisor feedback) ----------------
+
+NOSHAKE_BASE = """NoSHAKE synthetic
+ &cntrl
+  imin = 0,
+  nstlim = 50000,
+  dt = 0.001,
+  cut = 9.0,
+  ntc = 1,
+  ntf = 1,
+  ntt = 3,
+  gamma_ln = 2.0,
+  temp0 = 300.0,
+  ntpr = 2500,
+  ntwx = 0,
+ /
+"""
+
+
+def tier1_dt_shake_cap(scratch_base):
+    print("[tier1] dt cap depends on SHAKE (0.002 with SHAKE, 0.001 without)", file=sys.stderr)
+    d = scratch_base / "shake"
+    d.mkdir(parents=True, exist_ok=True)
+    sd = d / "case"
+    sd.mkdir(exist_ok=True)
+    f = sd / "heat-1.in"
+
+    # No SHAKE: dt=0.002 must be rejected (cap is 0.001), file untouched.
+    f.write_text(NOSHAKE_BASE, newline="")
+    r = run_inproc(sd, "heat-1", "dt", "0.002")
+    _expect_code(r, "OUT_OF_BOUNDS", "noshake dt=0.002")
+    REP.add(not r.crashed and f.read_text() == NOSHAKE_BASE, "DT_CAP",
+            "noshake dt=0.002 rejected but file changed")
+
+    # No SHAKE: dt=0.0005 (≤0.001) accepted.
+    f.write_text(NOSHAKE_BASE, newline="")
+    r = run_inproc(sd, "heat-1", "dt", "0.0005")
+    REP.add(not r.crashed and r.env.get("ok") is True, "DT_CAP",
+            f"noshake dt=0.0005 should be ok: {r.crashed_detail or r.env}")
+
+    # SHAKE on: dt=0.002 accepted (cap is 0.002).
+    shake = NOSHAKE_BASE.replace("ntc = 1", "ntc = 2").replace("ntf = 1", "ntf = 2")
+    f.write_text(shake, newline="")
+    r = run_inproc(sd, "heat-1", "dt", "0.002")
+    REP.add(not r.crashed and r.env.get("ok") is True, "DT_CAP",
+            f"shake-on dt=0.002 should be ok: {r.crashed_detail or r.env}")
+
+
+# ---- Tier 1g: restraint transitions (enable / disable) ------------------
+
+def tier1_restraints(scratch_base):
+    print("[tier1] restraint transitions (enable/disable)", file=sys.stderr)
+    d = scratch_base / "restr"
+    d.mkdir(parents=True, exist_ok=True)
+    mask = '!:WAT,Cl-,K+,Na+ & !@H='
+    cases = [
+        ("relax", "enable", "2.5", mask),       # insert path (no mask line)
+        ("press-1", "enable", "3.0", mask),     # in-place: ntr already 1, mask present
+        ("heat-1", "enable", "5.0", mask),      # idempotent no-op (already on, same wt+mask)
+        ("press-1", "disable", None, None),     # ntr 1 -> 0
+        ("relax", "disable", None, None),       # already off -> unchanged
+        ("group:all", "enable", "2.0", mask),   # group (mix of insert + in-place)
+        ("group:all", "disable", None, None),
+    ]
+    for sel, op, wt, mk in cases:
+        sc = make_scratch(d, f"{op}-{sel.replace(':', '_')}")
+        if op == "enable":
+            extra = ["--stage", sel, "--enable-restraints", "--restraint-wt", wt,
+                     "--restraintmask", mk]
+            exp = O.spec_enable(sel, wt, mk, GT)
+        else:
+            extra = ["--stage", sel, "--disable-restraints"]
+            exp = O.spec_disable(sel, GT)
+        res = run_argv(sc, extra)
+        rp = f"restraint {op} {sel}"
+        if res.crashed:
+            REP.add(False, "RESTRAINT", f"{rp}: crashed {res.crashed_detail}", rp)
+            continue
+        env = res.env
+        REP.add(env.get("ok") == exp.ok, "RESTRAINT_OK",
+                f"{rp}: ok exp {exp.ok} got {env.get('ok')} {env.get('errors')}", rp)
+        recs = {f["file"]: f for f in env.get("outputs", {}).get("files", [])}
+        for st, (estatus, _) in exp.per_file.items():
+            fn = O.STAGE_FILE[st]
+            rec = recs.get(fn, {})
+            REP.note_status(estatus)
+            REP.add(rec.get("status") == estatus, "RESTRAINT_STATUS",
+                    f"{rp} {fn}: exp {estatus} got {rec.get('status')}", rp)
+            cur, orig = file_text(sc, st), GT.text[st]
+            if estatus in ("unchanged", "error", "skipped"):
+                REP.add(cur == orig, "RESTRAINT_UNTOUCHED",
+                        f"{rp} {fn}: should be byte-identical for {estatus}", rp)
+            elif estatus == "edited":
+                try:
+                    if op == "enable":
+                        O.verify_enable_restraints(orig, cur, mask=mk,
+                                                   wt_rendered=exp.rendered,
+                                                   inserted=not GT.mask_present[st])
+                    else:
+                        O.verify_disable_restraints(orig, cur)
+                    REP.add(True, "RESTRAINT_ORACLE", "")
+                except O.OracleError as e:
+                    REP.add(False, "RESTRAINT_ORACLE", f"{rp} {fn}: {e}", rp)
+        # idempotency: an identical re-run must be byte-identical everywhere
+        before = {O.STAGE_FILE[s]: file_text(sc, s) for s in O.STAGES}
+        run_argv(sc, extra)
+        for s in O.STAGES:
+            REP.add(file_text(sc, s) == before[O.STAGE_FILE[s]], "RESTRAINT_IDEMPOTENT",
+                    f"{rp}: identical re-run changed {O.STAGE_FILE[s]}", rp)
+
+    # negative cases
+    sc = make_scratch(d, "neg")
+    r = run_argv(sc, ["--stage", "relax", "--enable-restraints", "--restraint-wt", "2.5"])
+    _expect_code(r, "MISSING_REQUIRED_ARG", "enable missing mask")
+    r = run_argv(sc, ["--stage", "relax", "--enable-restraints", "--restraint-wt", "2.5",
+                      "--restraintmask", "   "])
+    _expect_code(r, "INVALID_MASK", "enable empty mask")
+    r = run_argv(sc, ["--stage", "relax", "--enable-restraints", "--restraint-wt", "-1",
+                      "--restraintmask", mask])
+    _expect_code(r, "OUT_OF_BOUNDS", "enable negative wt")
+    r = run_argv(sc, ["--stage", "relax", "--param", "dt", "--value", "0.001",
+                      "--disable-restraints"])
+    _expect_code(r, "MODE_CONFLICT", "mode conflict")
+
+
 # ---- Coverage gate ------------------------------------------------------
 
 REQUIRED_STATUSES = {"edited", "unchanged", "skipped", "error"}
@@ -575,6 +713,8 @@ def main():
     tier1_format_equivalence(scratch)
     tier1_synthetic(out_dir)
     tier1_faults(out_dir)
+    tier1_dt_shake_cap(out_dir)
+    tier1_restraints(out_dir)
     coverage_gate()
     dt = time.time() - t0
 

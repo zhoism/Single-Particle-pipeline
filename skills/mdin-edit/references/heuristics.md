@@ -47,10 +47,39 @@ Edits are scoped to the `&cntrl` block (start → the line-anchored closing `/`)
 coupling targets specifically the `&wt` block whose body is `type='TEMP0'` — not the
 `type='END'` terminator — so `value2` is written in the ramp block only.
 
-### Couple `temp0` ↔ `&wt value2`, but only when it applies
-The coupling fires only when `nmropt=1` **and** a TEMP0 `&wt` block exists (the heating
-stages). For relax/prod (`temp0` present, no `&wt`) it does nothing — no spurious namelist is
-created. `value1` (the ramp start) is never modified; only the ramp end follows `temp0`.
+### Couple `temp0` to whatever the stage's temperature model needs
+Two mutually-exclusive couplings, both keyed off the file:
+- **Heating stage** (`nmropt=1` **and** a TEMP0 `&wt` block): also set the ramp end `value2`.
+  `value1` (the ramp start) and `tempi` (also a ramp start) are never touched.
+- **Constant-T stage** (`tempi` present, **no** TEMP0 ramp, `nmropt≠1` → relax/prod): also set
+  `tempi` so `tempi == temp0` (no thermal transient at the start of a constant-T run).
+Pressurization stages (`temp0`, no `tempi`, no ramp) get neither — just the plain `temp0`
+edit. The `nmropt≠1` guard on the constant-T branch stops a half-disassembled heat stage
+(ramp removed but `tempi` still a ramp start) from being mistaken for a constant-T stage.
+
+### `dt` cap follows SHAKE; flag a hot `dt`
+The `dt` hard cap is read from the stage: `≤0.002` ps with SHAKE on (`ntc=2, ntf=2`), `≤0.001`
+ps without (the global ceiling stays `0.002` — we don't do HMR). Above 300 K a `dt` at the cap
+gets a non-blocking advisory (hotter atoms travel further per step). The cap only tightens
+where `dt` is actually present, so a `dt` edit on a min stage still falls through to
+`PARAM_NOT_FOUND`, not `OUT_OF_BOUNDS`.
+
+### `nstlim` carries its output schedule
+After an `nstlim` edit the result reports `trajectory_frames = nstlim // ntwx` and
+`energy_outputs = nstlim // ntpr`, warning on zero / very-sparse / non-multiple sampling.
+`ntwx=0` means the trajectory is intentionally off (heat/press) — so it never warns about
+frames there. The advisor's "present before applying" maps onto `--dry-run` (the skill is
+non-interactive; dry-run is its review-before-commit step).
+
+### Restraint transitions are a quarantined transaction
+Enabling restraints is multi-key (`ntr`, `restraint_wt`, `restraintmask`) and may need to
+**insert** a `restraintmask` line where a stage has none — the single deliberate exception to
+"never append", confined to `--enable-restraints` and gated by a line-count self-check. The
+mask is the only non-numeric value the skill writes: validated shallowly (non-empty, ≤256,
+no `"`/`'`/`/`/newline — bytes that corrupt the namelist line or terminator) and **read back
+through a quoted-value regex, NOT the vendored parser** (whose `! comment` strip would eat a
+mask that starts with `!`). Disabling is just `ntr=0`; the now-inert `restraint_wt`/mask are
+left in place (AMBER ignores them).
 
 ### Cut floor: accept the advisor's 7.0, but flag it
 The project validator FAILs `cut < 8` Å for explicit solvent. The advisor's task explicitly

@@ -33,12 +33,7 @@ GT = O.load_ground_truth()
 
 
 def edit_expectation(stage, param, rendered):
-    allowed = {("cntrl", param)}
-    must = [("cntrl", param, rendered)]
-    if param == "temp0" and GT.wt_temp0[stage]:
-        allowed.add(("wt", "value2"))
-        must.append(("wt", "value2", rendered))
-    return allowed, must
+    return O.edit_expectation(stage, param, rendered, GT)
 
 
 def make_md(base: Path, name: str) -> Path:
@@ -95,10 +90,9 @@ def verify_one(wrapper: Path, selector, param, value, md) -> list[str]:
                 O.verify_edit(orig, cur, allowed_changes=allowed, must_equal=must)
             except O.OracleError as e:
                 probs.append(f"{fn} oracle: {e}")
-            if exp.warn_cut and not rec.get("warnings"):
-                probs.append(f"{fn} missing cut warn")
-            if (not exp.warn_cut) and rec.get("warnings"):
-                probs.append(f"{fn} spurious warn")
+            expect_w = O.expected_warn_for_edit(st, param, str(value), exp.rendered, GT)
+            if bool(rec.get("warnings")) != expect_w:
+                probs.append(f"{fn} warn presence exp {expect_w} got {rec.get('warnings')}")
     return probs
 
 
@@ -120,18 +114,101 @@ def verify_ambiguous(wrapper: Path, base: Path) -> list[str]:
     return probs
 
 
+MASK = '!:WAT,Cl-,K+,Na+ & !@H='
+
+# Restraint-transition slice (enable insert + in-place + disable). Used in baseline
+# and to kill the restraint-op mutants.
+RESTRAINT_SLICE = [
+    ("relax", "enable", "2.5", MASK),     # insert path
+    ("press-1", "enable", "3.0", MASK),   # in-place mask edit
+    ("press-1", "disable", None, None),   # ntr 1 -> 0
+]
+
+
+def verify_restraint(wrapper: Path, base: Path, selector, op, wt, mask) -> list[str]:
+    d = base / f"r-{op}-{selector.replace(':', '_')}"
+    d.mkdir(parents=True, exist_ok=True)
+    for s in O.STAGES:
+        (d / O.STAGE_FILE[s]).write_text(GT.text[s], newline="")
+    if op == "enable":
+        extra = ["--stage", selector, "--enable-restraints", "--restraint-wt", wt,
+                 "--restraintmask", mask]
+        exp = O.spec_enable(selector, wt, mask, GT)
+    else:
+        extra = ["--stage", selector, "--disable-restraints"]
+        exp = O.spec_disable(selector, GT)
+    p = subprocess.run(["python3", str(wrapper), "--md-dir", str(d)] + extra,
+                       capture_output=True, text=True)
+    try:
+        env = json.loads(p.stdout)
+    except Exception:
+        return [f"restraint {op} {selector}: no-json rc={p.returncode}"]
+    probs = []
+    if env.get("ok") != exp.ok:
+        probs.append(f"restraint {op} {selector}: ok exp {exp.ok} got {env.get('ok')}")
+    recs = {f["file"]: f for f in env.get("outputs", {}).get("files", [])}
+    for st, (estatus, _) in exp.per_file.items():
+        fn = O.STAGE_FILE[st]
+        rec = recs.get(fn, {})
+        if rec.get("status") != estatus:
+            probs.append(f"{fn} status exp {estatus} got {rec.get('status')}")
+        cur, orig = (d / fn).read_text(newline=""), GT.text[st]
+        if estatus in ("unchanged", "error", "skipped"):
+            if cur != orig:
+                probs.append(f"{fn} touched on {estatus}")
+        elif estatus == "edited":
+            try:
+                if op == "enable":
+                    O.verify_enable_restraints(orig, cur, mask=mask, wt_rendered=exp.rendered,
+                                               inserted=not GT.mask_present[st])
+                else:
+                    O.verify_disable_restraints(orig, cur)
+            except O.OracleError as e:
+                probs.append(f"{fn} oracle: {e}")
+    return probs
+
+
+NOSHAKE = (" &cntrl\n  imin = 0,\n  nstlim = 50000,\n  dt = 0.001,\n  cut = 9.0,\n"
+           "  ntc = 1,\n  ntf = 1,\n  temp0 = 300.0,\n  ntpr = 2500,\n  ntwx = 0,\n /\n")
+
+
+def verify_noshake_dt(wrapper: Path, base: Path) -> list[str]:
+    """No-SHAKE (ntc=1,ntf=1) stage: dt=0.002 must be rejected (cap is 0.001)."""
+    d = base / "noshake"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "heat-1.in"
+    f.write_text(NOSHAKE, newline="")
+    p = subprocess.run(["python3", str(wrapper), "--md-dir", str(d), "--stage", "heat-1",
+                        "--param", "dt", "--value", "0.002"], capture_output=True, text=True)
+    try:
+        env = json.loads(p.stdout)
+    except Exception:
+        return [f"noshake: no-json rc={p.returncode}"]
+    probs = []
+    if env.get("ok") is not False or not any("OUT_OF_BOUNDS" in e for e in env.get("errors", [])):
+        probs.append(f"noshake dt=0.002: exp OUT_OF_BOUNDS got ok={env.get('ok')} {env.get('errors')}")
+    if f.read_text() != NOSHAKE:
+        probs.append("noshake dt=0.002: file modified")
+    return probs
+
+
 # Curated slice: collectively exercises bounds, no-op, coupling, render-format,
-# warn band (both sides), applicability, and the input gate.
+# warn band (both sides), applicability, the input gate, the temp0→tempi coupling,
+# and the nstlim output schedule (sparse + ntwx=0-no-warn).
 SLICE = [
     ("heat-1", "dt", "0.001"),
     ("heat-1", "dt", "0.01"),       # OUT_OF_BOUNDS
     ("heat-1", "dt", "0.002"),      # at-target -> unchanged (no-op detection)
     ("heat-3", "temp0", "310"),     # coupling value2 (+ '.0' render)
     ("heat-1", "temp0", "305"),     # coupling on a stage where value2 differs
+    ("relax", "temp0", "310"),      # constant-T: tempi coupling
     ("relax", "cut", "7.0"),        # warn band present
     ("relax", "cut", "8.0"),        # warn band ABSENT (boundary)
     ("press-1", "restraint_wt", "1.0"),
+    ("relax", "nstlim", "20000"),   # schedule: sparse (4 frames) -> warn
+    ("heat-1", "nstlim", "25000"),  # schedule: ntwx=0 -> NO frame warn (clean energy)
     ("min1", "dt", "0.001"),        # PARAM_NOT_FOUND single -> error
+    ("min1", "dt", "0.01"),         # global dt cap binds (no dt on min) -> OUT_OF_BOUNDS
     ("heat-1", "nstlim", "inf"),    # input gate -> INVALID_VALUE (no crash; caught by isfinite)
     ("heat-1", "nstlim", "1_000"),  # underscore literal -> INVALID_VALUE (VAL_ASCII-only catch)
     ("heat-1", "dt", "０.００２"),       # fullwidth unicode digits -> INVALID_VALUE (VAL_ASCII-only catch)
@@ -143,8 +220,8 @@ MUTANTS = [
      [("lambda v: 0 < v <= 0.002", "lambda v: 0 < v <= 0.02")],
      "dt upper bound", False),
     ("coupling-hits-value1",
-     [('temp0_wt_span(text2), "value2", rendered',
-       'temp0_wt_span(text2), "value1", rendered')],
+     [('out2 = set_param_in_block(text2, wt_span, "value2", rendered)',
+       'out2 = set_param_in_block(text2, wt_span, "value1", rendered)  # mutant')],
      "temp0/&wt coupling targets the wrong key", False),
     ("render-drop-dot0",
      [('return f"{int(d)}.0"', 'return f"{int(d)}"')],
@@ -166,6 +243,29 @@ MUTANTS = [
      [('vstart, vend = start + m.start("val"), start + m.end("val")',
        'vstart, vend = start + m.start("val"), start + m.end("val") + 1')],
      "edit span eats one extra byte (corruption; self-check should catch)", False),
+    # ---- advisor-feedback 2026-06-22 mutants ----
+    ("dt-cap-ignores-shake",
+     [("cap = dt_cap_for(text)", "cap = 0.002  # mutant")],
+     "dt cap ignores ntc/ntf (no-SHAKE 0.002 wrongly accepted)", False),
+    ("tempi-coupling-wrong-key",
+     [('out3 = set_param_in_block(text2, cntrl_span(text2), "tempi", rendered)',
+       'out3 = set_param_in_block(text2, cntrl_span(text2), "temp0", rendered)  # mutant')],
+     "constant-T temp0 coupling leaves tempi stale", False),
+    ("enable-skips-insert",
+     [('        text2 = _insert_restraintmask_line(text2, span[0] + wm.start(), mask)\n        inserted = True',
+       '        inserted = True  # mutant: insertion skipped')],
+     "enable-restraints never inserts the mask line", False),
+    ("disable-wrong-ntr",
+     [('set_param_in_block(text, cntrl_span(text), "ntr", "0")',
+       'set_param_in_block(text, cntrl_span(text), "ntr", "1")  # mutant')],
+     "disable-restraints sets ntr to the wrong value", False),
+    ("schedule-no-sparse-warn",
+     [("elif frames < 10:", "elif frames < 0:  # mutant")],
+     "nstlim schedule never warns on sparse sampling", False),
+    ("schedule-warns-ntwx0",
+     [('sched["trajectory_off"] = True',
+       'sched["trajectory_off"] = True; warnings.append("MUTANT")')],
+     "nstlim schedule warns even when ntwx=0 (trajectory off by design)", False),
 ]
 
 
@@ -192,6 +292,9 @@ def main() -> int:
     for sel, p, v in SLICE:
         base_probs += [(sel, p, v, x) for x in verify_one(SCRIPTS / "wrapper.py", sel, p, v, md)]
     base_probs += [("ambig", "", "", x) for x in verify_ambiguous(SCRIPTS / "wrapper.py", base)]
+    base_probs += [("noshake", "", "", x) for x in verify_noshake_dt(SCRIPTS / "wrapper.py", base)]
+    for sel, op, wt, mk in RESTRAINT_SLICE:
+        base_probs += [(sel, op, "", x) for x in verify_restraint(SCRIPTS / "wrapper.py", base, sel, op, wt, mk)]
     if base_probs:
         print("  BASELINE NOT CLEAN — harness/engine disagree before mutation:", file=sys.stderr)
         for b in base_probs[:10]:
@@ -217,6 +320,16 @@ def main() -> int:
             probs = verify_ambiguous(wp, base)
             if probs:
                 killer = f"ambiguous: {probs[0]}"
+        if killer is None:
+            probs = verify_noshake_dt(wp, base)
+            if probs:
+                killer = f"noshake: {probs[0]}"
+        if killer is None:
+            for sel, op, wt, mk in RESTRAINT_SLICE:
+                probs = verify_restraint(wp, base, sel, op, wt, mk)
+                if probs:
+                    killer = f"restraint {op}/{sel}: {probs[0]}"
+                    break
         shutil.rmtree(wp.parent, ignore_errors=True)
         if killer:
             killed.append((name, invariant, killer))

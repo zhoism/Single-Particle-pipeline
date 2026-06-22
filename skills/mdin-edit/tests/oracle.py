@@ -262,6 +262,12 @@ class GroundTruth:
     current: dict[str, dict[str, str]]  # stage -> {param: current token}
     sha: dict[str, str]
     text: dict[str, str]
+    tempi: dict[str, Optional[str]] = field(default_factory=dict)        # &cntrl tempi token
+    ntwx: dict[str, Optional[int]] = field(default_factory=dict)
+    ntpr: dict[str, Optional[int]] = field(default_factory=dict)
+    shake_on: dict[str, bool] = field(default_factory=dict)              # ntc==2 and ntf==2
+    mask_present: dict[str, bool] = field(default_factory=dict)          # restraintmask line exists
+    mask_value: dict[str, Optional[str]] = field(default_factory=dict)   # unquoted mask string
 
     def snapshot_hash(self, stage: str) -> str:
         return self.sha[stage]
@@ -273,8 +279,18 @@ EXPECT_NTR1 = {"min1", "heat-1", "heat-2", "heat-3", "press-1", "press-2", "pres
 EXPECT_WT = {"heat-1", "heat-2", "heat-3"}
 
 
+def _int_or_none(tok: Optional[str]) -> Optional[int]:
+    if tok is None:
+        return None
+    try:
+        return int(float(tok))
+    except (ValueError, TypeError):
+        return None
+
+
 def load_ground_truth(demo: Path = DEMO_DIR) -> GroundTruth:
     present, ntr, wt, current, sha, text = {}, {}, {}, {}, {}, {}
+    tempi, ntwx, ntpr, shake, mask_present, mask_value = {}, {}, {}, {}, {}, {}
     for st in STAGES:
         p = demo / STAGE_FILE[st]
         raw = p.read_text()
@@ -286,7 +302,16 @@ def load_ground_truth(demo: Path = DEMO_DIR) -> GroundTruth:
         ntr[st] = int(float(c["ntr"])) if "ntr" in c else None
         wt[st] = sc.wt_temp0() is not None
         current[st] = {k: c[k] for k in SUPPORTED if k in c}
-    gt = GroundTruth(present, ntr, wt, current, sha, text)
+        tempi[st] = c.get("tempi")
+        ntwx[st] = _int_or_none(c.get("ntwx"))
+        ntpr[st] = _int_or_none(c.get("ntpr"))
+        shake[st] = (_as_decimal(c.get("ntc", "")) == Decimal(2)
+                     and _as_decimal(c.get("ntf", "")) == Decimal(2))
+        mask_present[st] = "restraintmask" in c
+        mask_value[st] = c.get("restraintmask", "").strip("'\"") if "restraintmask" in c else None
+    gt = GroundTruth(present, ntr, wt, current, sha, text,
+                     tempi=tempi, ntwx=ntwx, ntpr=ntpr, shake_on=shake,
+                     mask_present=mask_present, mask_value=mask_value)
     _verify_ground_truth(gt)
     return gt
 
@@ -408,6 +433,11 @@ def spec(selector: str, param: str, raw: str, gt: GroundTruth) -> Expected:
             wt = IndependentScanner(gt.text[st]).wt_temp0() or {}
             if _as_decimal(wt.get("value2", "")) != _as_decimal(rendered):
                 at_target = False
+        # temp0 on a constant-T stage (relax/prod: tempi present, no &wt ramp) is at
+        # target only if the coupled tempi is also already equal.
+        elif param == "temp0" and gt.tempi.get(st) is not None:
+            if _as_decimal(gt.tempi[st] or "") != _as_decimal(rendered):
+                at_target = False
         per[st] = ("unchanged" if at_target else "edited", None)
 
     # single-stage: a not-applicable becomes a hard error
@@ -424,3 +454,167 @@ def spec(selector: str, param: str, raw: str, gt: GroundTruth) -> Expected:
         coupling = "wt-or-none"
     return Expected(per_file=per, ok=ok, warn_cut=warn_cut, coupling=coupling,
                     rendered=rendered)
+
+
+# ---- Shared expectation helpers (used by fuzz + mutation) ----------------
+
+def _num_str(tok: Optional[str]) -> Optional[float]:
+    if tok is None:
+        return None
+    try:
+        return float(tok)
+    except (ValueError, TypeError):
+        return None
+
+
+def edit_expectation(stage: str, param: str, rendered: str, gt: GroundTruth):
+    """(allowed_changes, must_equal) for verify_edit, accounting for both temp0
+    couplings: heat stage → &wt value2; constant-T stage (relax/prod) → tempi."""
+    allowed = {("cntrl", param)}
+    must = [("cntrl", param, rendered)]
+    if param == "temp0" and gt.wt_temp0[stage]:
+        allowed.add(("wt", "value2"))
+        must.append(("wt", "value2", rendered))
+    elif param == "temp0" and gt.tempi.get(stage) is not None:
+        allowed.add(("cntrl", "tempi"))
+        must.append(("cntrl", "tempi", rendered))
+    return allowed, must
+
+
+def expected_warn_for_edit(stage: str, param: str, raw: str, rendered: str,
+                           gt: GroundTruth) -> bool:
+    """DESIRED contract: does an EDITED stage carry >=1 advisory warning? Independent
+    re-derivation of the cut-floor / hot-dt / nstlim-schedule advisories (the engine
+    must agree). Only meaningful for stages the spec marks 'edited'."""
+    fv = _num_str(raw)
+    if fv is None:
+        return False
+    if param == "cut" and 6.0 <= fv < 8.0:
+        return True
+    if param in ("dt", "temp0"):
+        post_temp0 = fv if param == "temp0" else _num_str(gt.current[stage].get("temp0"))
+        post_dt = fv if param == "dt" else _num_str(gt.current[stage].get("dt"))
+        cap = 0.002 if gt.shake_on.get(stage) else 0.001
+        if (post_temp0 is not None and post_dt is not None
+                and post_temp0 > 300.0 and post_dt >= cap - 1e-9):
+            return True
+    if param == "nstlim":
+        nst = int(fv)
+        nx, npr = gt.ntwx.get(stage), gt.ntpr.get(stage)
+        if nx is not None and nx > 0 and (nst // nx < 10 or nst % nx != 0):
+            return True
+        if npr is not None and npr > 0 and (nst // npr == 0 or nst % npr != 0):
+            return True
+    return False
+
+
+# ---- Restraint-transition oracle (enable / disable) ----------------------
+
+_MASKLINE_RE = re.compile(r'(\s*)restraintmask\s*=\s*"([^"]*)",?\s*\Z')
+
+
+def verify_enable_restraints(orig: str, result: str, *, mask: str,
+                             wt_rendered: str, inserted: bool) -> None:
+    """Independent oracle for --enable-restraints. Allows the ONE controlled mask-line
+    insertion (when `inserted`); every other changed line must be a numeric-token-only
+    edit (ntr 0→1, restraint_wt). Then asserts ntr==1, restraint_wt, restraintmask via
+    the independent scanner. Preserves collateral-damage detection."""
+    o, r = line_split(orig), line_split(result)
+    if inserted:
+        if len(r) != len(o) + 1:
+            raise OracleError(f"enable: expected exactly +1 line, got {len(r) - len(o)}")
+        mask_idxs = [i for i, ln in enumerate(r) if re.match(r"\s*restraintmask\s*=", ln)]
+        if len(mask_idxs) != 1:
+            raise OracleError(f"enable: expected 1 restraintmask line in result, got {len(mask_idxs)}")
+        ins = r[mask_idxs[0]]
+        m = _MASKLINE_RE.match(ins)
+        if not m or m.group(2) != mask:
+            raise OracleError(f"enable: inserted mask line malformed/mismatched: {ins!r}")
+        r2 = r[:mask_idxs[0]] + r[mask_idxs[0] + 1:]
+        if len(r2) != len(o):
+            raise OracleError("enable: line bookkeeping error after removing the insert")
+        for i in range(len(o)):
+            if o[i] != r2[i]:
+                numeric_run(o[i], r2[i])   # only ntr/restraint_wt may differ
+    else:
+        if len(r) != len(o):
+            raise OracleError(f"enable in-place: line count changed {len(o)} -> {len(r)}")
+        for i in range(len(o)):
+            if o[i] == r[i]:
+                continue
+            if re.match(r"\s*restraintmask\s*=", o[i]):
+                m = _MASKLINE_RE.match(r[i])
+                if not m or m.group(2) != mask:
+                    raise OracleError(f"enable in-place: mask line wrong: {r[i]!r}")
+            else:
+                numeric_run(o[i], r[i])
+    rc = IndependentScanner(result).cntrl()
+    if _as_decimal(rc.get("ntr", "")) != Decimal(1):
+        raise OracleError(f"enable: ntr != 1 (got {rc.get('ntr')!r})")
+    if _as_decimal(rc.get("restraint_wt", "")) != _as_decimal(wt_rendered):
+        raise OracleError(f"enable: restraint_wt {rc.get('restraint_wt')!r} != {wt_rendered!r}")
+    got_mask = rc.get("restraintmask", "").strip("'\"")
+    if got_mask != mask:
+        raise OracleError(f"enable: restraintmask {got_mask!r} != {mask!r}")
+    if not canonical_format_ok("dt", rc.get("restraint_wt", "")):
+        raise OracleError(f"enable: non-canonical restraint_wt token {rc.get('restraint_wt')!r}")
+
+
+def verify_disable_restraints(orig: str, result: str) -> None:
+    """Independent oracle for --disable-restraints: only the ntr token may change
+    (to 0); nothing appended/removed."""
+    o, r = line_split(orig), line_split(result)
+    if len(r) != len(o):
+        raise OracleError(f"disable: line count changed {len(o)} -> {len(r)}")
+    for i in range(len(o)):
+        if o[i] != r[i]:
+            numeric_run(o[i], r[i])
+    rc = IndependentScanner(result).cntrl()
+    if _as_decimal(rc.get("ntr", "")) != Decimal(0):
+        raise OracleError(f"disable: ntr != 0 (got {rc.get('ntr')!r})")
+
+
+def spec_enable(selector: str, wt_raw: str, mask_raw: str, gt: GroundTruth) -> Expected:
+    """Expected outcome of --enable-restraints (mirrors the wrapper's global gates
+    then per-stage edited/unchanged prediction)."""
+    s = (mask_raw or "").strip()
+    if (not s) or len(s) > 256 or '"' in s or "\n" in s or "\r" in s:
+        return Expected(global_error="INVALID_MASK", ok=False)
+    if not VAL_ASCII.fullmatch((wt_raw or "").strip()):
+        return Expected(global_error="INVALID_VALUE", ok=False)
+    if float(wt_raw) < 0.0:
+        return Expected(global_error="OUT_OF_BOUNDS", ok=False)
+    wt_rendered = render_expected("restraint_wt", wt_raw.strip())
+    if selector in GROUPS:
+        stages = GROUPS[selector]
+    elif selector in STAGE_FILE:
+        stages = [selector]
+    else:
+        return Expected(global_error="UNKNOWN_STAGE", ok=False)
+    per = {}
+    for st in stages:
+        if gt.ntr[st] is None:
+            per[st] = ("error", "PARAM_NOT_FOUND")
+            continue
+        ntr_change = gt.ntr[st] != 1
+        wt_change = _as_decimal(gt.current[st].get("restraint_wt", "")) != _as_decimal(wt_rendered)
+        mask_change = (gt.mask_value[st] != s) if gt.mask_present[st] else True
+        per[st] = ("edited" if (ntr_change or wt_change or mask_change) else "unchanged", None)
+    return Expected(per_file=per, ok=all(stt != "error" for stt, _ in per.values()),
+                    rendered=wt_rendered)
+
+
+def spec_disable(selector: str, gt: GroundTruth) -> Expected:
+    if selector in GROUPS:
+        stages = GROUPS[selector]
+    elif selector in STAGE_FILE:
+        stages = [selector]
+    else:
+        return Expected(global_error="UNKNOWN_STAGE", ok=False)
+    per = {}
+    for st in stages:
+        if gt.ntr[st] is None:
+            per[st] = ("error", "PARAM_NOT_FOUND")
+            continue
+        per[st] = ("edited" if gt.ntr[st] != 0 else "unchanged", None)
+    return Expected(per_file=per, ok=all(stt != "error" for stt, _ in per.values()))

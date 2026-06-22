@@ -63,6 +63,24 @@ echo "$ENV_JSON" | python3 -c "import json,sys; e=json.load(sys.stdin); sys.exit
 # confirm an actual MD stage now has the reduced nstlim
 grep -qx "  nstlim = $NSTLIM," "$SC/heat-1.in" || fail "heat-1 nstlim not reduced by mdin-edit"
 
+# --- 2b. exercise the advisor-feedback edit paths so the chain runs WITH them ---
+# (i) enable-restraints on min2 — the mask-INSERT path (min2 has ntr=0, no mask).
+EJSON="$(python3 "$WRAPPER" --md-dir "$SC" --stage min2 --enable-restraints \
+  --restraint-wt 5.0 --restraintmask '!:WAT,Cl-,K+,Na+ & !@H=' 2>/dev/null)"
+echo "$EJSON" | python3 -c "import json,sys;sys.exit(0 if json.load(sys.stdin)['ok'] else 1)" \
+  || fail "enable-restraints on min2 returned ok:false"
+grep -qx '  ntr = 1,' "$SC/min2.in" || fail "min2 ntr not enabled"
+grep -qx '  restraintmask = "!:WAT,Cl-,K+,Na+ & !@H=",' "$SC/min2.in" \
+  || fail "min2 restraintmask line not inserted"
+echo "[smoke] enable-restraints inserted a restraintmask line in min2.in" >&2
+# (ii) temp0 -> 310 from the third stage onward — exercises the tempi coupling on
+#      relax/prod and the &wt value2 coupling on heat-3, in a real run.
+TJSON="$(python3 "$WRAPPER" --md-dir "$SC" --stage group:third-onward --param temp0 --value 310 2>/dev/null)"
+echo "$TJSON" | python3 -c "import json,sys;sys.exit(0 if json.load(sys.stdin)['ok'] else 1)" \
+  || fail "temp0->310 group edit returned ok:false"
+grep -qx '  tempi = 310.0,' "$SC/relax.in" || fail "relax tempi not coupled to 310"
+echo "[smoke] temp0->310 (relax/prod tempi coupled) applied" >&2
+
 # --- 3. fast-smoke trims OUTSIDE mdin-edit's scope (maxcyc, &wt istep2) --------
 sed -i.bak "s/maxcyc = 10000/maxcyc = $NSTLIM/" "$SC"/min1.in "$SC"/min2.in
 sed -i.bak "s/istep2 = 40000/istep2 = $NSTLIM/" "$SC"/heat-1.in "$SC"/heat-2.in "$SC"/heat-3.in

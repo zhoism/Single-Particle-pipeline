@@ -4,7 +4,7 @@ description: "Edit one parameter in one stage (or a stage-group) of a pre-prepar
 license: MIT
 homepage: https://github.com/zhoism/Single-Particle
 compatibility: Pure Python 3 (stdlib only). No AMBER binaries required to edit; AmberTools/pmemd only needed to later RUN the edited files.
-metadata: {"openclaw":{"requires":{"env":[]},"os":["darwin"]},"requires":{"bins":[],"env":[]},"inputs":{"md_dir":"path — a COPY of the advisor's mdin set","stage":"stage name | group:third-onward | group:all (required unless --submit)","param":"dt|cut|temp0|restraint_wt|nstlim (required unless --submit)","value":"number (required unless --submit)","dry_run":"flag","submit":"flag — run the edited set locally (min1..prod pmemd chain)","reduce_nstlim":"int, default 120 — nstlim for the --submit smoke","keep":"flag — keep the --submit scratch dir"},"outputs":{"files":"per-stage edit records (old→new per namelist.param)","log":"<md_dir>/mdin-edit.log","submit":"per-stage rc + normal_termination + final_rst7"},"validation":["idempotent_parse_replace_never_append","bounds_dt_cut_temp0_restraint_wt_nstlim","stage_aware_file_targeting","wt_temp0_value2_coupling","post_edit_self_check_reparse","submit_amberhome_rewrite_foreign_path_clean"],"dry_run":true,"source":"project-prime/skills/mdin-edit","stage":"Phase3.ParamEditor"}
+metadata: {"openclaw":{"requires":{"env":[]},"os":["darwin"]},"requires":{"bins":[],"env":[]},"inputs":{"md_dir":"path — a COPY of the advisor's mdin set","stage":"stage name | group:third-onward | group:all (required unless --submit)","param":"dt|cut|temp0|restraint_wt|nstlim (required unless --submit)","value":"number (required unless --submit)","dry_run":"flag","submit":"flag — run the edited set locally (min1..prod pmemd chain)","reduce_nstlim":"int, default 120 — nstlim for the --submit smoke","keep":"flag — keep the --submit scratch dir","enable_restraints":"flag — ntr=1 + restraint_wt + restraintmask (inserts mask line if absent)","disable_restraints":"flag — ntr=0","restraint_wt":"number — force constant for --enable-restraints","restraintmask":"string — atom mask for --enable-restraints"},"outputs":{"files":"per-stage edit records (old→new per namelist.param)","log":"<md_dir>/mdin-edit.log","submit":"per-stage rc + normal_termination + final_rst7"},"validation":["idempotent_parse_replace_never_append","bounds_dt_cut_temp0_restraint_wt_nstlim","dt_shake_aware_cap","stage_aware_file_targeting","wt_temp0_value2_coupling","temp0_tempi_constant_T_coupling","nstlim_output_schedule","restraint_enable_disable_transitions","post_edit_self_check_reparse","submit_amberhome_rewrite_foreign_path_clean"],"dry_run":true,"source":"project-prime/skills/mdin-edit","stage":"Phase3.ParamEditor"}
 ---
 
 # mdin-edit
@@ -42,10 +42,14 @@ prepared.
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `--md-dir` | path | yes | Directory holding the mdin files. **Pass a COPY** of the advisor's set — the skill is non-destructive but the copy-first discipline is yours. |
-| `--stage` | string | yes | A stage (`min1`, `min2`, `heat-1…3`, `press-1…3`, `relax`, `prod`) **or** a group: `group:third-onward` = {heat-3, press-3, relax, prod}; `group:all` = all 10. |
-| `--param` | string | yes | One of `dt`, `cut`, `temp0`, `restraint_wt`, `nstlim`. |
-| `--value` | number | yes | The new value. Rendered canonically (`310` → `310.0` for float params; integer for `nstlim`). |
-| `--dry-run` | flag | no | Plan + validate the edit and print the would-be result; write nothing, log nothing. With `--submit`: plan the run (rewrite + reduce) but invoke no pmemd. |
+| `--stage` | string | yes (not `--submit`) | A stage (`min1`, `min2`, `heat-1…3`, `press-1…3`, `relax`, `prod`) **or** a group: `group:third-onward` = {heat-3, press-3, relax, prod}; `group:all` = all 10. |
+| `--param` | string | edit mode | One of `dt`, `cut`, `temp0`, `restraint_wt`, `nstlim`. |
+| `--value` | number | edit mode | The new value. Rendered canonically (`310` → `310.0` for float params; integer for `nstlim`). |
+| `--enable-restraints` | flag | no | Turn positional restraints **on** in `--stage`: sets `ntr=1`, `restraint_wt=<--restraint-wt>`, `restraintmask=<--restraintmask>` (inserts the mask line where the stage has none). Requires `--restraint-wt` and `--restraintmask`. |
+| `--disable-restraints` | flag | no | Turn positional restraints **off** in `--stage`: sets `ntr=0` (leaves the now-inert `restraint_wt`/`restraintmask`). |
+| `--restraint-wt` | number | with enable | Force constant (kcal/mol·Å²) for `--enable-restraints`. |
+| `--restraintmask` | string | with enable | Atom-mask string for `--enable-restraints` (e.g. `'!:WAT,Cl-,K+,Na+ & !@H='`). No `"`, `'`, `/`, or newline. |
+| `--dry-run` | flag | no | Plan + validate the edit and print the would-be result (incl. the `nstlim` output schedule); write nothing, log nothing. With `--submit`: plan the run (rewrite + reduce) but invoke no pmemd. |
 | `--submit` | flag | no | Run the **already-edited** set locally to prove it runs (separate mode; `--stage/--param/--value` not needed). See **Submit** below. |
 | `--reduce-nstlim` | int | no | `nstlim` for the `--submit` smoke (default `120`; `≥100` so the MC barostat is happy on the NPT stages). |
 | `--keep` | flag | no | Keep the `--submit` scratch dir instead of deleting it (scratch is also kept automatically on a stage failure). |
@@ -96,15 +100,25 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
 - **Idempotent parse-replace, never append.** Only the numeric token is rewritten; comma,
   inline comment, indentation and `=` spacing are preserved. Re-running the same edit yields
   a byte-identical file (`status:"unchanged"`).
-- **Bounds (hard, reject = `OUT_OF_BOUNDS`):** `0 < dt ≤ 0.002` ps (2 fs SHAKE cap), `0 <
-  temp0 ≤ 400` K, `restraint_wt ≥ 0`, `nstlim > 0` (integer), `6 ≤ cut ≤ 12` Å. Advisory
-  **WARN** for `6 ≤ cut < 8` Å (below the project validator's explicit-solvent floor, but
-  accepted deliberately — PME reciprocal space covers long-range electrostatics).
+- **Bounds (hard, reject = `OUT_OF_BOUNDS`):** `0 < temp0 ≤ 400` K, `restraint_wt ≥ 0`,
+  `nstlim > 0` (integer), `6 ≤ cut ≤ 12` Å. **`dt` is SHAKE-aware:** `≤ 0.002` ps with SHAKE
+  on (`ntc=2, ntf=2`), `≤ 0.001` ps without — read from the stage. Advisory **WARN** for
+  `6 ≤ cut < 8` Å (below the validator's explicit-solvent floor, accepted deliberately — PME
+  reciprocal space covers long-range electrostatics), and a **hot-`dt` advisory** when a stage
+  ends up `temp0 > 300` K with `dt` at the cap (higher T → larger velocities; consider reducing `dt`).
 - **Stage-aware targeting.** `--stage`/group resolves to the right file(s); a parameter that
   isn't present in a stage (`dt`/`temp0` in `min1/min2`) is refused, not appended.
-- **`&wt` temp0-ramp coupling.** Editing `temp0` in a heating stage with `nmropt=1` also sets
-  the `&wt TEMP0` block's `value2` (the ramp end), keeping them consistent. (`value1`, the
-  ramp start, is never touched.)
+- **Temperature coupling (`temp0`).** In a **heating** stage (`nmropt=1` + `&wt TEMP0` ramp),
+  editing `temp0` also sets the ramp end `value2` (the `value1` ramp start is never touched).
+  In a **constant-T** stage (relax/prod: `tempi` present, no ramp), editing `temp0` also sets
+  `tempi` so `tempi == temp0`. Pressurization stages (no `tempi`, no ramp) get just `temp0`.
+- **`nstlim` output schedule.** After an `nstlim` edit the envelope carries an
+  `output_schedule` (`ntwx → trajectory_frames`, `ntpr → energy_outputs`) plus advisory
+  warnings on zero / very-sparse / non-multiple sampling (`ntwx=0` = trajectory off, no warn).
+  Use `--dry-run` to review the schedule before committing.
+- **Restraint transitions.** `--enable-restraints` (ntr=1 + `restraint_wt` + `restraintmask`,
+  inserting the mask line where absent) and `--disable-restraints` (ntr=0) — the insert is the
+  only line the skill ever adds, quarantined to enable mode and line-count self-checked.
 - **Post-edit self-check.** The result is re-parsed with an independent parser and the new
   value asserted; a mismatch is a hard `SELF_CHECK_FAILED` and **nothing is written**.
 - **Advisory validation.** The vendored `check_amber` logic runs over the result for
@@ -116,7 +130,9 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
 | Code | Cause | Recovery |
 |------|-------|----------|
 | `UNSUPPORTED_PARAM` | `--param` not in {dt, cut, temp0, restraint_wt, nstlim}. | Use a supported parameter (extend `HARD_BOUNDS` to add more). |
-| `OUT_OF_BOUNDS` | Value violates the physical bound for that param. | Choose a value within bounds; see Validation gates. |
+| `OUT_OF_BOUNDS` | Value violates the physical bound (incl. the SHAKE-aware `dt` cap). | Choose a value within bounds; see Validation gates. |
+| `MODE_CONFLICT` | More than one of `--param` / `--enable-restraints` / `--disable-restraints` / `--submit`. | Use exactly one operation per call. |
+| `INVALID_MASK` | `--restraintmask` empty, >256 chars, or contains `"` / `'` / `/` / newline. | Provide a plain AMBER atom mask (those bytes would corrupt the namelist). |
 | `NONINTEGER_VALUE` | `nstlim` given a non-integer. | Pass an integer number of steps. |
 | `UNKNOWN_STAGE` | `--stage` not a stage or group. | Use a listed stage or `group:third-onward`/`group:all`. |
 | `MD_DIR_NOT_FOUND` | `--md-dir` is not a directory. | Point at a copy of the mdin set. |
@@ -171,6 +187,32 @@ The envelope reports `outputs.mode:"submit"`, a per-stage list (`rc`, `normal_te
 `rst7_bytes`), and `final_rst7`; `ok` is true only if all ten stages reach normal termination.
 `--submit --dry-run` does steps 1–2 and reports the plan without invoking pmemd (no toolchain
 needed — good for CI). This productizes `tests/smoke_edit_run.sh`.
+
+## Restraint transitions (advisor feedback 2026-06-22)
+
+Turning positional restraints on/off is a multi-key transaction, so it has its own modes
+(mutually exclusive with `--param`/`--submit`):
+
+```
+# Enable: ntr=1 + restraint_wt + restraintmask (inserts the mask line if the stage has none)
+python3 scripts/wrapper.py --md-dir <copy> --stage relax \
+    --enable-restraints --restraint-wt 2.5 --restraintmask '!:WAT,Cl-,K+,Na+ & !@H='
+
+# Disable: just ntr=0 (the now-inert restraint_wt/restraintmask are left in place)
+python3 scripts/wrapper.py --md-dir <copy> --stage press-1 --disable-restraints
+```
+
+Enabling is idempotent (a no-op re-run is byte-identical), all-or-nothing, atomic, and
+self-checked (ntr/restraint_wt re-parsed; the mask read back through a quoted-value reader
+because the vendored parser's comment-strip would eat a mask starting with `!`). The mask line
+insertion is the only line the skill ever adds and is gated by a line-count self-check.
+
+## Reviewing an `nstlim` change before committing
+
+`nstlim` edits return an `output_schedule` and sampling warnings. Run `--dry-run` first to see
+the resulting trajectory/energy frame counts *without writing*, then re-run without `--dry-run`
+to commit — this is the skill's "present and confirm before applying" path (it is
+non-interactive / all-or-nothing, so `--dry-run` is the review step).
 
 ## Guarantees — how mistakes are avoided (Task 4 summary)
 

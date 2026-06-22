@@ -45,6 +45,8 @@ from typing import Any, Optional
 # Vendored validator (self-contained copy; see its provenance header).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_amber_vendored import (  # noqa: E402
+    DT_MAX_NOSHAKE,
+    DT_MAX_SHAKE,
     check_amber_in,
     num,
     parse_namelists,
@@ -75,7 +77,7 @@ GROUPS = {
 
 # Rendering classes — see render_value(). Pinning float-ness to the PARAM, not
 # the existing token, is what makes the edit idempotent across a type change.
-INT_PARAMS = {"nstlim", "istep1", "istep2", "maxcyc", "ncyc"}
+INT_PARAMS = {"nstlim", "istep1", "istep2", "maxcyc", "ncyc", "ntr"}
 FLOAT_PARAMS = {"dt", "cut", "temp0", "restraint_wt", "value1", "value2",
                 "tempi", "gamma_ln", "pres0", "taup"}
 
@@ -286,6 +288,115 @@ def bounds_verdict(param: str, raw: str) -> tuple[bool, Optional[str], list[str]
     return True, None, warns
 
 
+# ---- Stage-context advisories (advisor feedback 2026-06-22) ---------------
+#
+# These are file-AWARE: unlike bounds_verdict (a pure value check), they read the
+# stage's own &cntrl to coordinate dt with SHAKE/temperature and nstlim with the
+# output frequency. dt's hard cap becomes context-aware here; the rest are
+# non-blocking WARNs surfaced through res.warnings (same channel as the cut floor).
+
+def shake_on(text: str) -> bool:
+    """SHAKE constrains bonds-to-H iff ntc==2 AND ntf==2 (matches the vendored
+    validator's coherence rule). Anything else → treat SHAKE as off (stricter dt)."""
+    return num(cntrl_get(text, "ntc")) == 2 and num(cntrl_get(text, "ntf")) == 2
+
+
+def dt_cap_for(text: str) -> float:
+    """Max dt for THIS stage: 0.002 ps with SHAKE on, 0.001 ps without (Amber
+    manual). Reading ntc/ntf is what makes the cap context-aware rather than a flat
+    2 fs everywhere."""
+    return DT_MAX_SHAKE if shake_on(text) else DT_MAX_NOSHAKE
+
+
+def hot_dt_advisory(temp0: float | None, dt: float | None, cap: float) -> Optional[str]:
+    """Non-blocking advisory: above 300 K, larger atomic velocities mean longer
+    travel per step, so a dt sitting at the SHAKE cap is risky. Fires only on the
+    post-edit state of a dt/temp0 edit; never blocks (advisory only)."""
+    if temp0 is not None and dt is not None and temp0 > 300.0 and dt >= cap - 1e-9:
+        return (f"temp0={temp0:g} K (>300) with dt={dt:g} ps at the {cap:g} ps cap: "
+                "higher temperature means larger atomic velocities per step — consider "
+                "reducing dt for stability (Amber manual). Advisory only — not blocking.")
+    return None
+
+
+def output_schedule(text: str, nstlim: int) -> dict[str, Any]:
+    """Compute the trajectory/energy output schedule a given nstlim produces, with
+    advisory warnings when it yields zero/sparse frames or an uneven final interval.
+    ntwx==0 means trajectory is intentionally OFF (heat/press stages) → no frame
+    warning. All warnings are non-blocking. Returns {"schedule": {...}, "warnings": [...]}."""
+    ntwx = num(cntrl_get(text, "ntwx"))
+    ntpr = num(cntrl_get(text, "ntpr"))
+    sched: dict[str, Any] = {
+        "nstlim": nstlim,
+        "ntwx": None if ntwx is None else int(ntwx),
+        "ntpr": None if ntpr is None else int(ntpr),
+        "trajectory_frames": None,
+        "energy_outputs": None,
+        "trajectory_off": False,
+    }
+    warnings: list[str] = []
+    if ntwx is not None and int(ntwx) == 0:
+        sched["trajectory_off"] = True            # intentional (heating/press): no warn
+    elif ntwx is not None and int(ntwx) > 0:
+        iw = int(ntwx)
+        frames = nstlim // iw
+        sched["trajectory_frames"] = frames
+        if frames == 0:
+            warnings.append(f"nstlim={nstlim} < ntwx={iw}: ZERO trajectory frames will "
+                            "be written (no usable trajectory).")
+        elif frames < 10:
+            warnings.append(f"nstlim={nstlim} / ntwx={iw} → only {frames} trajectory "
+                            "frame(s); very sparse sampling.")
+        if nstlim % iw != 0:
+            warnings.append(f"nstlim={nstlim} is not a multiple of ntwx={iw}: the final "
+                            "trajectory interval is truncated (align nstlim % ntwx == 0).")
+    if ntpr is not None and int(ntpr) > 0:
+        ip = int(ntpr)
+        eo = nstlim // ip
+        sched["energy_outputs"] = eo
+        if eo == 0:
+            warnings.append(f"nstlim={nstlim} < ntpr={ip}: ZERO energy records will be "
+                            "written.")
+        if nstlim % ip != 0:
+            warnings.append(f"nstlim={nstlim} is not a multiple of ntpr={ip}: the final "
+                            "energy interval is truncated (align nstlim % ntpr == 0).")
+    return {"schedule": sched, "warnings": warnings}
+
+
+# ---- Restraint-mask string handling (enable-restraints op) ---------------
+#
+# restraintmask is the ONE non-numeric value this skill edits. It is handled by a
+# small, separate path (NOT a generalization of the numeric token engine) used only
+# by the restraint-transition modes. Validation is deliberately shallow — we guard
+# the bytes that would corrupt the namelist line or our scanner, not AMBER mask
+# semantics (the agent/user owns the mask's chemistry).
+
+def validate_mask(raw: str) -> str:
+    s = raw.strip()
+    if not s:
+        raise EditError("INVALID_MASK", "restraintmask is empty")
+    if len(s) > 256:
+        raise EditError("INVALID_MASK", f"restraintmask too long ({len(s)} > 256 chars)")
+    # Forbid the bytes that would corrupt the namelist line or our scanners:
+    #   " / '  → quote chars + the namelist terminator '/' (the vendored parser's
+    #   NAMELIST_RE stops at the first '/', which would truncate every key after the
+    #   mask line); newline/CR → split the line. AMBER masks never need any of these.
+    bad = [c for c in ('"', "'", "/", "\n", "\r") if c in s]
+    if bad:
+        raise EditError("INVALID_MASK",
+                        f"restraintmask must not contain {bad} (would corrupt the namelist)")
+    return s
+
+
+def render_mask_line(indent: str, mask: str, trailing_comma: bool) -> str:
+    """A canonical, always-double-quoted restraintmask line, matching the demo style."""
+    return f'{indent}restraintmask = "{mask}"' + ("," if trailing_comma else "")
+
+
+# A restraintmask assignment scoped to &cntrl: captures the quoted value token only.
+RMASK_RE = re.compile(r'(?<![\w])restraintmask\s*=\s*(?P<q>["\'])(?P<val>[^"\']*)(?P=q)')
+
+
 # ---- Per-file orchestration ----------------------------------------------
 
 @dataclass
@@ -297,6 +408,7 @@ class FileResult:
     reason: Optional[str] = None      # CODE: detail (for skipped/error)
     new_text: Optional[str] = None    # in-memory result (None if no write needed)
     validation: dict | None = None    # advisory vendored verdict
+    output_schedule: dict | None = None  # nstlim → trajectory/energy schedule (nstlim edits)
 
 
 def validate_text(text: str) -> Any:
@@ -323,6 +435,17 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
     if cntrl_span(text) is None:
         return FileResult(name, "error", reason="NAMELIST_NOT_FOUND: no &cntrl block")
 
+    # Context-aware dt cap (advisor feedback): the max timestep depends on SHAKE —
+    # 0.002 ps with ntc=2,ntf=2, else 0.001 ps. Only applies where dt is present (the
+    # MD stages); on a min stage with no dt this falls through to PARAM_NOT_FOUND.
+    if param == "dt" and cntrl_get(text, "dt") is not None:
+        cap = dt_cap_for(text)
+        if float(raw) > cap + 1e-9:
+            shake = "SHAKE on (ntc=2,ntf=2)" if cap == DT_MAX_SHAKE else "no SHAKE (ntc/ntf != 2)"
+            return FileResult(name, "error",
+                              reason=(f"OUT_OF_BOUNDS: dt={raw} ps exceeds the {cap:g} ps cap "
+                                      f"for this stage [{shake}]"))
+
     # Applicability: restraint_wt is a no-op where restraints are off (ntr != 1).
     if param == "restraint_wt":
         ntr = num(cntrl_get(text, "ntr"))
@@ -345,11 +468,17 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
     edits.append({"namelist": "cntrl", "param": param,
                   "old": out.old, "new": out.new, "changed": out.changed})
 
-    # Coupling: temp0 in an nmropt=1 stage with a TEMP0 &wt ramp also sets value2.
+    # Coupling for temp0. Two mutually-exclusive cases (advisor feedback 2026-06-22):
+    #   (a) HEAT stage (nmropt=1 with a TEMP0 &wt ramp): the ramp END value2 follows
+    #       temp0 — keeps the heat-3 class of temp0/&wt drift from recurring. tempi
+    #       is the ramp START and must NOT be touched.
+    #   (b) CONSTANT-T stage (relax/prod: tempi present, NO TEMP0 ramp): tempi tracks
+    #       temp0, so the constant-temperature stage starts and holds at the target.
+    #   press stages (temp0, no tempi, no ramp) get neither — just the plain temp0 edit.
     if param == "temp0":
-        nmropt = num(cntrl_get(text2, "nmropt"))
-        if nmropt == 1 and temp0_wt_span(text2) is not None:
-            out2 = set_param_in_block(text2, temp0_wt_span(text2), "value2", rendered)
+        wt_span = temp0_wt_span(text2)
+        if wt_span is not None and num(cntrl_get(text2, "nmropt")) == 1:
+            out2 = set_param_in_block(text2, wt_span, "value2", rendered)
             if out2.ambiguous:
                 return FileResult(name, "error",
                                   reason="AMBIGUOUS_PARAM: value2 appears more than once in &wt TEMP0")
@@ -357,6 +486,18 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
                 text2 = out2.text
                 edits.append({"namelist": "wt", "param": "value2",
                               "old": out2.old, "new": out2.new, "changed": out2.changed})
+        elif (wt_span is None and num(cntrl_get(text2, "nmropt")) != 1
+              and cntrl_get(text2, "tempi") is not None):
+            # constant-T only: nmropt!=1 guards against a heat-like stage whose TEMP0
+            # ramp has been removed but whose tempi is still a ramp START.
+            out3 = set_param_in_block(text2, cntrl_span(text2), "tempi", rendered)
+            if out3.ambiguous:
+                return FileResult(name, "error",
+                                  reason="AMBIGUOUS_PARAM: tempi appears more than once in &cntrl")
+            if out3.found:
+                text2 = out3.text
+                edits.append({"namelist": "cntrl", "param": "tempi",
+                              "old": out3.old, "new": out3.new, "changed": out3.changed})
 
     # Self-check: re-parse the result with the INDEPENDENT vendored parser and
     # assert it now reads the rendered value. Catches any wrong-span regex bug.
@@ -369,6 +510,11 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
         if gv2 != rendered:
             return FileResult(name, "error",
                               reason=f"SELF_CHECK_FAILED: after edit &wt value2={gv2!r} != {rendered!r}")
+    if any(e["namelist"] == "cntrl" and e["param"] == "tempi" for e in edits):
+        gti = cntrl_get(text2, "tempi")
+        if gti != rendered:
+            return FileResult(name, "error",
+                              reason=f"SELF_CHECK_FAILED: after edit tempi={gti!r} != {rendered!r}")
 
     changed_any = any(e["changed"] for e in edits)
     res = FileResult(name, "edited" if changed_any else "unchanged",
@@ -376,7 +522,24 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
 
     # Editor's own advisory warning (e.g. cut below the 8 Å project floor).
     _, _, warns = bounds_verdict(param, raw)
-    res.warnings = warns
+    res.warnings = list(warns)
+
+    # Advisor feedback: coordinate dt with SHAKE + temperature. Reads the POST-edit
+    # state so it fires whether the user raised dt on a hot stage or raised temp0
+    # past 300 K on a dt-at-cap stage. Non-blocking.
+    if param in ("dt", "temp0"):
+        adv = hot_dt_advisory(num(cntrl_get(text2, "temp0")),
+                              num(cntrl_get(text2, "dt")), dt_cap_for(text2))
+        if adv:
+            res.warnings.append(adv)
+
+    # Advisor feedback: nstlim vs output frequency — attach the resulting trajectory/
+    # energy schedule and warn on zero/sparse/uneven sampling. (Presented for review
+    # in --dry-run before the user commits; never blocks.)
+    if param == "nstlim":
+        sr = output_schedule(text2, int(float(raw)))
+        res.output_schedule = sr["schedule"]
+        res.warnings.extend(sr["warnings"])
 
     # Advisory vendored validation on the would-be result (never gates ok).
     rep = validate_text(text2)
@@ -393,6 +556,171 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
             verdict = "WARN"
     res.validation = {"verdict": verdict, "findings": findings}
     return res
+
+
+# ---- Restraint transitions (advisor feedback 2026-06-22) -----------------
+#
+# Enabling/disabling positional restraints is a multi-key TRANSACTION, not a single
+# numeric edit, so it gets its own modes rather than the generic --param path:
+#   enable  → ntr=1, restraint_wt=<user>, restraintmask=<user> (INSERT the mask line
+#             where the stage has none — the ONLY place this skill adds a line, kept
+#             out of the generic engine which never appends).
+#   disable → ntr=0 (leave restraint_wt/restraintmask as-is; AMBER ignores them).
+# Both are idempotent, all-or-nothing, atomic, self-checked — same as the editor.
+
+def _read_text(path: Path) -> str:
+    with open(path, "r", newline="") as fh:   # 3.11-safe; preserve exact line endings
+        return fh.read()
+
+
+def _insert_restraintmask_line(text: str, anchor_abs: int, mask: str) -> str:
+    """Insert a `restraintmask = "<mask>"` line on its own line immediately after the
+    line containing index `anchor_abs` (the restraint_wt line), copying that line's
+    indentation + trailing-comma style + newline flavour. Index-based (no re.sub)."""
+    # trailing-comma test ignores an inline '! comment' (the restraint_wt token is
+    # numeric, so a bare '!' split is safe — no quotes on this line).
+    def _ends_comma(ln: str) -> bool:
+        return ln.split("!", 1)[0].rstrip().endswith(",")
+
+    line_start = text.rfind("\n", 0, anchor_abs) + 1   # 0 if this is the first line
+    nl_pos = text.find("\n", anchor_abs)
+    if nl_pos == -1:                                    # anchor is the last (unterminated) line
+        line = text[line_start:]
+        indent = line[:len(line) - len(line.lstrip())]
+        return text + "\n" + render_mask_line(indent, mask, _ends_comma(line))
+    crlf = nl_pos > 0 and text[nl_pos - 1] == "\r"
+    line = text[line_start:(nl_pos - 1 if crlf else nl_pos)]
+    indent = line[:len(line) - len(line.lstrip())]
+    comma = _ends_comma(line)
+    newline = "\r\n" if crlf else "\n"
+    insert_at = nl_pos + 1                              # start of the next line
+    return text[:insert_at] + render_mask_line(indent, mask, comma) + newline + text[insert_at:]
+
+
+def _read_mask(text: str) -> Optional[str]:
+    """Read the &cntrl restraintmask value via the quoted-value regex. NOT cntrl_get:
+    the vendored parser's comment-strip eats the '!' that masks start with, so it
+    cannot see restraintmask at all. RMASK_RE reads the quoted token directly."""
+    span = cntrl_span(text)
+    if span is None:
+        return None
+    matches = list(RMASK_RE.finditer(text[span[0]:span[1]]))
+    if len(matches) != 1:
+        return None
+    return matches[0].group("val")
+
+
+def plan_enable_restraints(path: Path, wt_raw: str, mask_raw: str) -> FileResult:
+    """Turn restraints ON: ntr=1, restraint_wt=<wt>, restraintmask=<mask> (edit the
+    mask in place if present, else insert one line). All in memory; writes nothing."""
+    name = path.name
+    text = _read_text(path)
+    if cntrl_span(text) is None:
+        return FileResult(name, "error", reason="NAMELIST_NOT_FOUND: no &cntrl block")
+
+    # Validate the user-supplied force constant + mask up front (hard, no write).
+    try:
+        mask = validate_mask(mask_raw)
+    except EditError as exc:
+        return FileResult(name, "error", reason=f"{exc.code}: {exc.msg}")
+    ok_b, berr, _ = bounds_verdict("restraint_wt", wt_raw)
+    if not ok_b:
+        return FileResult(name, "error", reason=berr)
+    wt_rendered = render_value("restraint_wt", wt_raw)
+
+    edits: list[dict] = []
+    text2 = text
+
+    # 1. ntr = 1
+    out_ntr = set_param_in_block(text2, cntrl_span(text2), "ntr", "1")
+    if out_ntr.ambiguous:
+        return FileResult(name, "error", reason="AMBIGUOUS_PARAM: ntr appears more than once in &cntrl")
+    if not out_ntr.found:
+        return FileResult(name, "error", reason="PARAM_NOT_FOUND: ntr not present in &cntrl")
+    text2 = out_ntr.text
+    edits.append({"namelist": "cntrl", "param": "ntr",
+                  "old": out_ntr.old, "new": out_ntr.new, "changed": out_ntr.changed})
+
+    # 2. restraint_wt = <wt>  (present in every stage, incl. ntr=0 ones at 0.0 → always an edit)
+    out_wt = set_param_in_block(text2, cntrl_span(text2), "restraint_wt", wt_rendered)
+    if out_wt.ambiguous:
+        return FileResult(name, "error", reason="AMBIGUOUS_PARAM: restraint_wt appears more than once in &cntrl")
+    if not out_wt.found:
+        return FileResult(name, "error", reason="PARAM_NOT_FOUND: restraint_wt not present in &cntrl")
+    text2 = out_wt.text
+    edits.append({"namelist": "cntrl", "param": "restraint_wt",
+                  "old": out_wt.old, "new": out_wt.new, "changed": out_wt.changed})
+
+    # 3. restraintmask: edit in place if a line exists, else INSERT one (the one
+    #    deliberate exception to never-append, scoped to this op).
+    span = cntrl_span(text2)
+    block = text2[span[0]:span[1]]
+    mmatches = list(RMASK_RE.finditer(block))
+    inserted = False
+    if len(mmatches) > 1:
+        return FileResult(name, "error", reason="AMBIGUOUS_PARAM: restraintmask appears more than once in &cntrl")
+    if len(mmatches) == 1:
+        m = mmatches[0]
+        old_mask = m.group("val")
+        if old_mask == mask:
+            edits.append({"namelist": "cntrl", "param": "restraintmask",
+                          "old": old_mask, "new": mask, "changed": False})
+        else:
+            vstart, vend = span[0] + m.start("val"), span[0] + m.end("val")
+            text2 = text2[:vstart] + mask + text2[vend:]
+            edits.append({"namelist": "cntrl", "param": "restraintmask",
+                          "old": old_mask, "new": mask, "changed": True})
+    else:
+        wm = key_re("restraint_wt").search(block)   # anchor: the restraint_wt line
+        if wm is None:                              # unreachable (edited it above) but safe
+            return FileResult(name, "error", reason="PARAM_NOT_FOUND: restraint_wt anchor for mask insert")
+        text2 = _insert_restraintmask_line(text2, span[0] + wm.start(), mask)
+        inserted = True
+        edits.append({"namelist": "cntrl", "param": "restraintmask",
+                      "old": None, "new": mask, "changed": True})
+
+    # Self-check (independent of the vendored parser for the mask — see _read_mask).
+    if cntrl_get(text2, "ntr") != "1":
+        return FileResult(name, "error",
+                          reason=f"SELF_CHECK_FAILED: after enable ntr={cntrl_get(text2, 'ntr')!r} != '1'")
+    if cntrl_get(text2, "restraint_wt") != wt_rendered:
+        return FileResult(name, "error",
+                          reason=f"SELF_CHECK_FAILED: after enable restraint_wt={cntrl_get(text2, 'restraint_wt')!r} != {wt_rendered!r}")
+    if _read_mask(text2) != mask:
+        return FileResult(name, "error",
+                          reason=f"SELF_CHECK_FAILED: after enable restraintmask={_read_mask(text2)!r} != {mask!r}")
+    # Line-count safety: enable adds exactly one line iff we inserted, else none.
+    delta = text2.count("\n") - text.count("\n")
+    if delta != (1 if inserted else 0):
+        return FileResult(name, "error",
+                          reason=f"SELF_CHECK_FAILED: enable changed line count by {delta} (expected {1 if inserted else 0})")
+
+    changed_any = any(e["changed"] for e in edits)
+    return FileResult(name, "edited" if changed_any else "unchanged",
+                      edits=edits, new_text=text2 if changed_any else None)
+
+
+def plan_disable_restraints(path: Path) -> FileResult:
+    """Turn restraints OFF: ntr=0 only (leave restraint_wt/restraintmask — AMBER
+    ignores them when ntr=0). All in memory; writes nothing."""
+    name = path.name
+    text = _read_text(path)
+    if cntrl_span(text) is None:
+        return FileResult(name, "error", reason="NAMELIST_NOT_FOUND: no &cntrl block")
+
+    out = set_param_in_block(text, cntrl_span(text), "ntr", "0")
+    if out.ambiguous:
+        return FileResult(name, "error", reason="AMBIGUOUS_PARAM: ntr appears more than once in &cntrl")
+    if not out.found:
+        return FileResult(name, "error", reason="PARAM_NOT_FOUND: ntr not present in &cntrl")
+    text2 = out.text
+    if cntrl_get(text2, "ntr") != "0":
+        return FileResult(name, "error",
+                          reason=f"SELF_CHECK_FAILED: after disable ntr={cntrl_get(text2, 'ntr')!r} != '0'")
+    edits = [{"namelist": "cntrl", "param": "ntr",
+              "old": out.old, "new": out.new, "changed": out.changed}]
+    return FileResult(name, "edited" if out.changed else "unchanged",
+                      edits=edits, new_text=text2 if out.changed else None)
 
 
 # ---- Submit: prove the (already-edited) mdin set runs locally ------------
@@ -607,7 +935,26 @@ def main() -> None:
                    help="nstlim for the --submit smoke (default 120; ≥100 for the MC barostat).")
     p.add_argument("--keep", action="store_true",
                    help="Keep the --submit scratch dir instead of deleting it.")
+    p.add_argument("--enable-restraints", action="store_true",
+                   help="Turn positional restraints ON in --stage: sets ntr=1, "
+                        "restraint_wt=<--restraint-wt>, restraintmask=<--restraintmask> "
+                        "(inserts the mask line where the stage has none).")
+    p.add_argument("--disable-restraints", action="store_true",
+                   help="Turn positional restraints OFF in --stage: sets ntr=0.")
+    p.add_argument("--restraint-wt", default=None,
+                   help="Force constant (kcal/mol·Å²) for --enable-restraints.")
+    p.add_argument("--restraintmask", default=None,
+                   help="Atom-mask string for --enable-restraints (e.g. "
+                        "'!:WAT,Cl-,K+,Na+ & !@H=').")
     args = p.parse_args()
+
+    # --- Exactly one operation mode: edit / enable / disable / submit. ---
+    n_modes = sum([args.param is not None, bool(args.enable_restraints),
+                   bool(args.disable_restraints), bool(args.submit)])
+    if n_modes != 1:
+        emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                      errors=["MODE_CONFLICT: use exactly one of --param / "
+                              "--enable-restraints / --disable-restraints / --submit"])
 
     # --- Submit mode: run the edited set locally (separate from the edit path). ---
     if args.submit:
@@ -615,35 +962,62 @@ def main() -> None:
                    args.dry_run, args.keep)
         return
 
-    # Edit mode needs the full triplet.
-    missing = [n for n, v in (("--stage", args.stage), ("--param", args.param),
-                              ("--value", args.value)) if v is None]
-    if missing:
+    if args.stage is None:
         emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
-                      errors=[f"MISSING_REQUIRED_ARG: {missing} "
-                              "(required unless --submit)"])
+                      errors=["MISSING_REQUIRED_ARG: ['--stage']"])
 
-    param = args.param.lower()
-    raw = args.value.strip()
+    # Mode-specific argument validation + a per-file planner closure. `op_param` /
+    # `op_value` only label the envelope; the closure carries the actual operation.
+    if args.param is not None:
+        if args.value is None:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                          errors=["MISSING_REQUIRED_ARG: ['--value']"])
+        param = args.param.lower()
+        raw = args.value.strip()
+        if param not in SUPPORTED_PARAMS:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                          errors=[f"UNSUPPORTED_PARAM: {param!r}; supported: "
+                                  f"{sorted(SUPPORTED_PARAMS)}"])
+        ok_b, berr, _ = bounds_verdict(param, raw)         # file-independent fast-fail
+        if not ok_b:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1, errors=[berr])
+        try:
+            rendered = render_value(param, raw)
+        except EditError as exc:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1, errors=[str(exc)])
+        op_param, op_value = param, rendered
 
-    # 1. Param supported?
-    if param not in SUPPORTED_PARAMS:
-        emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
-                      errors=[f"UNSUPPORTED_PARAM: {param!r}; supported: "
-                              f"{sorted(SUPPORTED_PARAMS)}"])
+        def plan_one(fp: Path) -> FileResult:
+            return plan_file_edit(fp, param, rendered, raw)
 
-    # 2. Value bounds (file-independent) — fail fast, touch nothing.
-    ok_b, berr, _ = bounds_verdict(param, raw)
-    if not ok_b:
-        emit_and_exit(ok=False, dry_run=args.dry_run, code=1, errors=[berr])
+    elif args.enable_restraints:
+        if args.restraint_wt is None or args.restraintmask is None:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                          errors=["MISSING_REQUIRED_ARG: --enable-restraints needs "
+                                  "--restraint-wt and --restraintmask"])
+        # Validate the mask + force constant ONCE (global) for a clean single error.
+        try:
+            validate_mask(args.restraintmask)
+        except EditError as exc:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                          errors=[f"{exc.code}: {exc.msg}"])
+        ok_b, berr, _ = bounds_verdict("restraint_wt", args.restraint_wt.strip())
+        if not ok_b:
+            emit_and_exit(ok=False, dry_run=args.dry_run, code=1, errors=[berr])
+        op_param = "enable-restraints"
+        op_value = {"restraint_wt": render_value("restraint_wt", args.restraint_wt.strip()),
+                    "restraintmask": args.restraintmask.strip()}
 
-    # 3. Canonical rendering.
-    try:
-        rendered = render_value(param, raw)
-    except EditError as exc:
-        emit_and_exit(ok=False, dry_run=args.dry_run, code=1, errors=[str(exc)])
+        def plan_one(fp: Path) -> FileResult:
+            return plan_enable_restraints(fp, args.restraint_wt, args.restraintmask)
 
-    # 4. Resolve stages.
+    else:  # args.disable_restraints
+        op_param, op_value = "disable-restraints", "ntr=0"
+
+        def plan_one(fp: Path) -> FileResult:
+            return plan_disable_restraints(fp)
+
+    # Resolve stages (shared across modes).
     if args.stage in GROUPS:
         stages = GROUPS[args.stage]
         is_group = True
@@ -660,7 +1034,7 @@ def main() -> None:
         emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
                       errors=[f"MD_DIR_NOT_FOUND: {md_dir}"])
 
-    # 5. Plan every file's edit IN MEMORY (no writes yet — all-or-nothing batch).
+    # Plan every file's operation IN MEMORY (no writes yet — all-or-nothing batch).
     results: list[FileResult] = []
     for st in stages:
         fpath = md_dir / STAGE_FILES[st]
@@ -668,7 +1042,7 @@ def main() -> None:
             results.append(FileResult(STAGE_FILES[st], "error",
                                       reason=f"STAGE_FILE_MISSING: {fpath}"))
             continue
-        res = plan_file_edit(fpath, param, rendered, raw)
+        res = plan_one(fpath)
         # "Not applicable" → skip in a group, but FAIL in a single-stage request.
         if res.status == "skipped" and not is_group:
             code = (res.reason or "").split(":", 1)[0]
@@ -687,6 +1061,8 @@ def main() -> None:
         rec: dict[str, Any] = {"file": r.file, "status": r.status, "edits": r.edits}
         if r.warnings:
             rec["warnings"] = r.warnings
+        if r.output_schedule is not None:
+            rec["output_schedule"] = r.output_schedule
         if r.reason:
             rec["reason"] = r.reason
         file_records.append(rec)
@@ -696,8 +1072,8 @@ def main() -> None:
     outputs: dict[str, Any] = {
         "md_dir": str(md_dir),
         "stage": args.stage,
-        "param": param,
-        "value": rendered,
+        "param": op_param,
+        "value": op_value,
         "files": file_records,
     }
     validation = {"per_file": validation_per_file}
