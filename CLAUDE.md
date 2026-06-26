@@ -86,6 +86,19 @@ A base layer for code work in this repo. For **vault** work, the vault's own act
    - the **physical-realism gates** baked into every wrapper.
    "Fix the bug" means: **write a test that reproduces it first, then make it pass.** A change isn't done until the relevant gate is green.
 
+## Definition of Done (anti-drift)
+
+A change isn't done when the gate goes green — it's done when the **record** catches up too. Shared discipline + the full status-document inventory live in the vault's `Definition_of_Done.md`; this is the code-side half.
+
+A **substantive code result** (a skill/wrapper change, a verified bug-fix, a new gate, a toolchain bump — *not* a scratch experiment) is **not done until:**
+
+1. **Status docs current** — `README.md` (scope/thesis) and/or `FEATURES.md` (per-skill flags/guardrails) updated if behavior changed; the affected skill's `references/` updated; and a marker in `../Single Particle/Dev_Log.md` (the shared running log — single source of truth for what changed and why).
+2. **Commit** the completed result.
+3. **Independent review of that commit before its push** — run `/code-review` on the diff, fix-or-accept the findings (the [[feedback-verify-and-eval]] discipline). Each commit is reviewed once.
+4. **Push** (`git push` prompts — that's the gate moment).
+
+Both repos are private + solo, so push is low-stakes and reversible; the gate catches drift, it doesn't gatekeep. A user-scope `Stop`-hook backstop (in `~/.claude`) nudges once if a session ends with uncommitted or unpushed work here. *Don't push a feature branch's commits until each has been reviewed.*
+
 ## Companion vault — when to use which
 
 For *design* questions, check the vault first: `../Single Particle/` (GitHub `zhoism/Single-Particle`). Landmark notes:
