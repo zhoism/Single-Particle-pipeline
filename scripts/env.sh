@@ -11,8 +11,12 @@
 PRIME_AMBER_SH="${PRIME_AMBER_SH:-/opt/homebrew/Caskroom/miniforge/base/envs/prime-amber/amber.sh}"
 PMEMD_BIN="${PMEMD_BIN:-$HOME/Downloads/pmemd26/bin}"
 
-# shellcheck disable=SC1090
-[ -f "$PRIME_AMBER_SH" ] && source "$PRIME_AMBER_SH"
+if [ -f "$PRIME_AMBER_SH" ]; then
+  # shellcheck disable=SC1090
+  source "$PRIME_AMBER_SH"
+else
+  echo "env.sh: WARNING: amber.sh not found at '$PRIME_AMBER_SH'; set PRIME_AMBER_SH. AmberTools (tleap/sander/antechamber/...) will be unavailable." >&2
+fi
 export PATH="$PMEMD_BIN:${AMBERHOME:+$AMBERHOME/bin:}$PATH"
 
 # The detached pipeline posts to Discord via the `openclaw` CLI (LLM-free), which
