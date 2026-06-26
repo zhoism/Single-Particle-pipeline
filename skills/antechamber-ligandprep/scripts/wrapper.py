@@ -356,6 +356,11 @@ def validate(mol2_path: Path, frcmod_path: Path,
         errors.append("MISSING_PARAMETERS: parmchk2 did not emit frcmod")
     else:
         frcmod_text = frcmod_path.read_text()
+        if not frcmod_text.strip():
+            errors.append(
+                "MISSING_PARAMETERS: frcmod is empty "
+                "(parmchk2 produced no parameters)"
+            )
         attn_lines = [
             ln for ln in frcmod_text.splitlines() if "ATTN" in ln
         ]
