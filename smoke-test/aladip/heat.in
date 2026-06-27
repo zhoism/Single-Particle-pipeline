@@ -1,0 +1,24 @@
+Heat 0 -> 300 K over 10 ps with Langevin thermostat
+ &cntrl
+  imin    = 0,        ! dynamics, not minimization
+  irest   = 0,        ! NOT a restart (no input velocities)
+  ntx     = 1,        ! read coordinates only
+  nstlim  = 5000,     ! 5000 steps * 0.002 ps = 10 ps total
+  dt      = 0.002,    ! 2 fs timestep — Project Prime hard cap (dt <= 2fs)
+  ntc     = 2,        ! SHAKE constrains all bonds involving H
+  ntf     = 2,        ! omit force evaluations on SHAKEn bonds
+  cut     = 8.0,      ! non-bonded cutoff
+  ntb     = 1,        ! constant volume PBC
+  ntp     = 0,        ! no barostat (NVT)
+  ntt     = 3,        ! Langevin thermostat
+  gamma_ln= 1.0,      ! Langevin friction coefficient (1/ps)
+  tempi   = 0.0,      ! starting temperature
+  temp0   = 300.0,    ! target — overridden by nmropt ramp below
+  nmropt  = 1,        ! enables the &wt temperature schedule
+  ntpr    = 500,      ! print energies every 500 steps
+  ntwx    = 500,      ! write trajectory frame every 500 steps -> 10 frames
+  ntwr    = 5000,     ! write restart at end
+  ioutfm  = 1,        ! NetCDF binary trajectory (mandatory for cpptraj efficiency)
+ /
+ &wt type='TEMP0', istep1=0, istep2=5000, value1=0.0, value2=300.0 /
+ &wt type='END' /

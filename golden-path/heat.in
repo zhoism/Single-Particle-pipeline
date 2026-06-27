@@ -1,0 +1,27 @@
+Heat 0 -> 300 K over 10 ps, NVT, solute restrained
+ &cntrl
+  imin    = 0,        ! dynamics
+  irest   = 0,        ! NOT a restart (no input velocities)
+  ntx     = 1,        ! read coordinates only
+  nstlim  = 5000,     ! 5000 * 0.002 ps = 10 ps
+  dt      = 0.002,    ! 2 fs — Project Prime hard cap (dt <= 2fs)
+  ntc     = 2,        ! SHAKE on all bonds involving H
+  ntf     = 2,        ! omit force eval on SHAKEn bonds
+  cut     = 8.0,      ! non-bonded cutoff
+  ntb     = 1,        ! constant volume PBC
+  ntp     = 0,        ! no barostat (NVT)
+  ntt     = 3,        ! Langevin thermostat
+  gamma_ln= 1.0,      ! Langevin friction (1/ps)
+  tempi   = 0.0,      ! starting temperature
+  temp0   = 300.0,    ! target (driven by the &wt ramp below)
+  ntr     = 1,        ! restrain solute while water heats around it
+  restraintmask = '!(:WAT,Cl-,Na+) & !@H=',
+  restraint_wt  = 5.0,
+  nmropt  = 1,        ! enable the &wt temperature schedule
+  ntpr    = 500,      ! print energies every 500 steps
+  ntwx    = 500,      ! trajectory frame every 500 steps -> 10 frames
+  ntwr    = 5000,     ! restart at end
+  ioutfm  = 1,        ! NetCDF trajectory
+ /
+ &wt type='TEMP0', istep1=0, istep2=5000, value1=0.0, value2=300.0 /
+ &wt type='END' /

@@ -1,0 +1,20 @@
+Production 10 ps, NVT at 300 K, unrestrained — the analyzed trajectory
+ &cntrl
+  imin    = 0,        ! dynamics
+  irest   = 1,        ! restart — read velocities + box from equil.rst
+  ntx     = 5,        ! coords + velocities + box
+  nstlim  = 5000,     ! 10 ps
+  dt      = 0.002,
+  ntc     = 2,
+  ntf     = 2,
+  cut     = 8.0,
+  ntb     = 1,        ! constant volume (box fixed after NPT equilibration)
+  ntp     = 0,        ! no barostat
+  ntt     = 3,        ! Langevin thermostat
+  gamma_ln= 1.0,
+  temp0   = 300.0,
+  ntpr    = 500,
+  ntwx    = 500,      ! 10 frames
+  ntwr    = 5000,
+  ioutfm  = 1,
+ /

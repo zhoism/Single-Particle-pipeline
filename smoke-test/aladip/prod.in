@@ -1,0 +1,20 @@
+Production NVT at 300 K, 10 ps
+ &cntrl
+  imin    = 0,        ! dynamics
+  irest   = 1,        ! restart — read velocities + box from heat.rst
+  ntx     = 5,        ! coords + velocities + box info
+  nstlim  = 5000,     ! 10 ps
+  dt      = 0.002,
+  ntc     = 2,
+  ntf     = 2,
+  cut     = 8.0,
+  ntb     = 1,
+  ntp     = 0,
+  ntt     = 3,
+  gamma_ln= 1.0,
+  temp0   = 300.0,
+  ntpr    = 500,
+  ntwx    = 500,
+  ntwr    = 5000,
+  ioutfm  = 1,
+ /

@@ -1,0 +1,26 @@
+Equilibrate 10 ps at 300 K, NPT (1 bar) — settles the box density. Backbone lightly restrained.
+ &cntrl
+  imin    = 0,        ! dynamics
+  irest   = 1,        ! restart — read velocities + box from heat.rst
+  ntx     = 5,        ! coords + velocities + box
+  nstlim  = 5000,     ! 10 ps
+  dt      = 0.002,
+  ntc     = 2,
+  ntf     = 2,
+  cut     = 8.0,
+  ntb     = 2,        ! constant PRESSURE PBC (box volume can change)
+  ntp     = 1,        ! isotropic position scaling
+  barostat= 2,        ! Monte Carlo barostat (robust, recommended)
+  pres0   = 1.0,      ! target pressure (bar)
+  taup    = 2.0,      ! pressure relaxation time (ps)
+  ntt     = 3,        ! Langevin thermostat
+  gamma_ln= 1.0,
+  temp0   = 300.0,
+  ntr     = 1,        ! light backbone restraint so the fold holds while density settles
+  restraintmask = '@CA,C,N',
+  restraint_wt  = 2.0,
+  ntpr    = 500,
+  ntwx    = 500,
+  ntwr    = 5000,
+  ioutfm  = 1,
+ /

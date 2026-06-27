@@ -1,0 +1,21 @@
+## Build alanine dipeptide (ACE-ALA-NME) in a TIP3P water box.
+## Output: system.prmtop (topology) + system.inpcrd (initial coordinates).
+
+source leaprc.protein.ff14SB
+source leaprc.water.tip3p
+
+## ACE = acetyl N-terminal cap; NME = N-methylamide C-terminal cap.
+## Together with the central ALA this gives the canonical "alanine dipeptide".
+mol = sequence { ACE ALA NME }
+
+## Solvate in a cubic TIP3P box, 10 Å buffer between solute and box edge.
+## Total system ends up at ~1500-2000 atoms — fast on a Mac CPU.
+solvatebox mol TIP3PBOX 10.0
+
+## Print net charge — should be 0 for alanine dipeptide.
+## If nonzero we'd need to addions to neutralize before MD.
+charge mol
+
+saveamberparm mol system.prmtop system.inpcrd
+
+quit

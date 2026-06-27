@@ -1,0 +1,12 @@
+Minimization: relax solvent + H around a restrained solute, 1000 cycles
+ &cntrl
+  imin   = 1,         ! minimization mode (no dynamics)
+  maxcyc = 1000,      ! total cycles
+  ncyc   = 500,       ! switch steepest-descent -> conjugate-gradient here
+  ntb    = 1,         ! periodic boundary, constant volume
+  cut    = 8.0,       ! non-bonded cutoff (Å) — Project Prime physical-realism range
+  ntpr   = 100,       ! print energy every 100 cycles
+  ntr    = 1,         ! positional restraints ON (reference = -ref structure)
+  restraintmask = '!(:WAT,Cl-,Na+) & !@H=',  ! restrain solute heavy atoms
+  restraint_wt  = 10.0,                       ! kcal/mol/Å^2
+ /

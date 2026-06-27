@@ -1,0 +1,19 @@
+## Smoke-test cpptraj analysis: confirm trajectories load and basic numbers come out.
+parm system.prmtop
+trajin heat.nc
+trajin prod.nc
+
+## Wrap molecules back into the central box (handles periodic boundaries)
+autoimage
+
+## RMSD of solute heavy atoms vs first frame (excludes hydrogens, waters, ions)
+rms first :1-3&!@H= out rmsd_solute.dat
+
+## Radius of gyration of solute
+radgyr :1-3 out radgyr.dat
+
+## Trajectory frame count sanity check (also catches truncated/empty .nc)
+trajout solute_only.nc netcdf onlyframes 1,last
+
+run
+quit

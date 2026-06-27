@@ -1,0 +1,15 @@
+## Verify that the antechamber + parmchk2 outputs are loadable by tleap
+## and produce a valid topology. Output: benzene.prmtop + benzene.inpcrd.
+
+source leaprc.gaff2
+
+## Load the antechamber-typed structure (GAFF2 atom types + AM1-BCC charges).
+BNZ = loadmol2 benzene_gaff2.mol2
+
+## Fill any parameter gaps surfaced by parmchk2.
+loadamberparams benzene.frcmod
+
+check BNZ
+saveamberparm BNZ benzene.prmtop benzene.inpcrd
+
+quit

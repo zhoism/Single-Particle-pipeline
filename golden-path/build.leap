@@ -1,0 +1,34 @@
+## Golden-path: build the T4 lysozyme L99A + benzene complex in TIP3P water.
+## Combines a protein (ff14SB) with a GAFF2/AM1-BCC ligand, solvates, and
+## neutralizes with counterions. Output: system.prmtop + system.inpcrd.
+
+source leaprc.protein.ff14SB     ## protein force field
+source leaprc.gaff2              ## general FF for the small-molecule ligand
+source leaprc.water.tip3p        ## TIP3P water + monovalent ion params
+
+## --- Ligand: load antechamber/parmchk2 outputs (GAFF2 types + AM1-BCC charges) ---
+BNZ = loadmol2 ligand_gaff2.mol2
+loadamberparams ligand.frcmod
+
+## --- Protein: pdb4amber-cleaned T4 lysozyme L99A (standard residues only) ---
+prot = loadpdb protein_clean.pdb
+
+## --- Combine into one unit. Benzene keeps its crystal coords in the L99A cavity. ---
+complex = combine { prot BNZ }
+
+## Net charge of the dry complex — tells us how many counterions are needed.
+charge complex
+
+## Solvate in a cubic TIP3P box, 10 Å buffer (drop to 8.0 if CPU runtime is too high).
+solvatebox complex TIP3PBOX 10.0
+
+## Neutralize: tleap adds only the correctly-signed ion (the other call adds 0).
+addions complex Na+ 0
+addions complex Cl- 0
+
+## Catch missing parameters / valence problems before we ever run sander.
+check complex
+
+saveamberparm complex system.prmtop system.inpcrd
+
+quit

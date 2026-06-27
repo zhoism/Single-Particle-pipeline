@@ -1,0 +1,42 @@
+## Golden-path analysis. Two passes:
+##   1) trajectory metrics on prod.nc (RMSD, RMSF, ligand RMSD)
+##   2) export the final stripped complex frame as a PDB for PLIP
+
+## ---- Pass 1: trajectory metrics ----
+parm system.prmtop
+trajin prod.nc
+
+## Re-wrap molecules into the primary box (periodic-boundary cleanup).
+autoimage
+
+## Protein backbone RMSD vs first frame (this also superposes every frame on frame 1).
+rms first @CA,C,N out rmsd_backbone.dat
+
+## Per-residue flexibility (RMSF) over the superposed trajectory — Project Prime Phase 4 metric.
+atomicfluct out rmsf.dat byres @CA
+
+## Benzene heavy-atom RMSD in the protein-aligned frame (does the ligand stay in the cavity?).
+rms ligand :BNZ&!@H= nofit out rmsd_ligand.dat
+
+run
+
+## ---- Pass 2: final-frame complex PDB for PLIP (protein + ligand, no solvent/ions) ----
+clear trajin
+trajin prod.rst
+autoimage
+strip :WAT,Cl-,Na+
+
+## Normalize AMBER protonation-variant residue names back to standard PDB names.
+## Otherwise downstream tools (PLIP) misread HIE/CYX/etc. as ligands, not protein.
+change resname from :HIE to HIS
+change resname from :HID to HIS
+change resname from :HIP to HIS
+change resname from :CYX to CYS
+change resname from :LYN to LYS
+change resname from :ASH to ASP
+change resname from :GLH to GLU
+
+trajout complex_frame.pdb pdb
+
+run
+quit
