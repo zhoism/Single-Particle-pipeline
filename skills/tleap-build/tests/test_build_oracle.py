@@ -344,6 +344,136 @@ def test_validate_log_errors_preserved(tmp: Path):
           validation.get("solvent_residues_added") == [1234], repr(validation))
 
 
+# ---- (5) parse_leap_log: bond-length capture (CROSS_GAP_SPURIOUS_BOND) ----
+
+def test_parse_leap_log_bonds(tmp: Path):
+    """parse_leap_log captures `bond of N angstroms` lengths, ignores the benign
+    `Close contact of N angstroms` clash line, and still reads `Added N
+    residues`. Hand-derived expected values from the regexes in the loop."""
+    log = tmp / "leap.log"
+    # Exact strings teLeap emits (ground-truthed by inducing a real gap):
+    #   "There is a bond of 4.084 angstroms between C and N atoms:"
+    #   "Close contact of N angstroms between nonbonded atoms ..."
+    log.write_text(
+        "Checking 'prot'....\n"
+        "/path/bin/teLeap: Warning!\n"
+        "There is a bond of 5.230 angstroms between C and N atoms:\n"
+        "There is a bond of 2.050 angstroms between C and N atoms:\n"   # legit S-S
+        "Close contact of 1.480 angstroms between nonbonded atoms HH11 and HD2\n"
+        "Added 1894 residues.\n")
+    errors, info = W.parse_leap_log(log)
+    # Both "bond of" lines captured in order; the close-contact line is NOT.
+    check("bond capture order+values",
+          info.get("bond_lengths_angstrom") == [5.23, 2.05],
+          repr(info.get("bond_lengths_angstrom")))
+    check("close-contact line not captured as a bond",
+          1.48 not in (info.get("bond_lengths_angstrom") or []),
+          repr(info.get("bond_lengths_angstrom")))
+    check("Added residues still parsed",
+          info.get("solvent_residues_added") == [1894],
+          repr(info.get("solvent_residues_added")))
+
+    # No bond/clash lines at all -> key simply absent (not [] vs crash).
+    clean = tmp / "leap_clean.log"
+    clean.write_text("Checking 'prot'....\nAdded 2000 residues.\n")
+    _, info2 = W.parse_leap_log(clean)
+    check("no bonds -> key absent",
+          "bond_lengths_angstrom" not in info2, repr(info2))
+
+    # Missing log file -> the existing LEAP_NO_LOG error, no bond key.
+    miss_err, miss_info = W.parse_leap_log(tmp / "no_such_leap.log")
+    check("missing log -> LEAP_NO_LOG",
+          any("LEAP_NO_LOG" in e for e in miss_err), repr(miss_err))
+
+
+def test_parse_leap_log_real_fixture():
+    """Pin CROSS_GAP to a REAL teLeap artifact, not just an assumed string —
+    this is what stops the gate+test from being wrong together (the failure mode
+    that made SYSTEM_NOT_NEUTRAL ship vacuous). The fixture is genuine
+    `loadpdb + check` output on a PDB with an excised interior stretch (an
+    un-TER'd chain gap); teLeap bonded across it and emitted the warning. It is
+    vendored as .txt (not .log) only to dodge the repo's *.log run-output
+    gitignore — the bond-warning line is byte-verbatim teLeap output."""
+    fixture = HERE / "fixtures" / "induced_cross_gap_leap_log.txt"
+    if not fixture.is_file():
+        print("  SKIP test_parse_leap_log_real_fixture (fixture missing)")
+        return
+    _, info = W.parse_leap_log(fixture)
+    bonds = info.get("bond_lengths_angstrom", [])
+    # Real teLeap emitted exactly one long bond at 4.084 A across the gap.
+    check("real fixture captures the 4.084 A cross-gap bond", bonds == [4.084],
+          repr(bonds))
+    long_bonds = [b for b in bonds if b > W.MAX_BOND_ANGSTROM]
+    check("real fixture trips CROSS_GAP (4.084 > 3.0)", long_bonds == [4.084],
+          repr(long_bonds))
+
+
+# ---- (6) validate: SOLVENT_NOT_ADDED -------------------------------------
+
+def _solvent_run_dir(tmp: Path, name: str, n_wat: int) -> Path:
+    """A clean run dir (no-ligand, dry<solvated, std protein residues) whose
+    comp_oct RESIDUE_LABEL carries `n_wat` WAT residues — isolates the water
+    gate from every other check."""
+    rd = _make_run_dir(tmp, name)
+    write_prmtop(rd / "comp_dry.top", natom=304, res_labels=["ALA", "GLY"])
+    write_prmtop(rd / "comp_oct.top", natom=5000,
+                 res_labels=["ALA", "GLY"] + ["WAT"] * n_wat)
+    for f in ("comp_dry.crd", "comp_oct.crd", "comp_oct.pdb"):
+        (rd / f).write_text("x\n")
+    return rd
+
+
+def test_validate_solvent(tmp: Path):
+    # 150 waters (>= SOLVENT_FLOOR 100) -> clean pass, water_residues recorded.
+    rd = _solvent_run_dir(tmp, "v_solv_ok", 150)
+    validation, errors = W.validate(rd, has_ligand=False,
+                                    log_errors=[], log_info={})
+    check("solvent ok: no SOLVENT_NOT_ADDED",
+          not any("SOLVENT_NOT_ADDED" in e for e in errors), repr(errors))
+    check("solvent ok: water_residues=150",
+          validation.get("water_residues") == 150,
+          repr(validation.get("water_residues")))
+    check("solvent ok: no errors at all", errors == [], repr(errors))
+
+    # 10 waters (< floor) -> SOLVENT_NOT_ADDED is the only error.
+    rd2 = _solvent_run_dir(tmp, "v_solv_bad", 10)
+    validation2, errors2 = W.validate(rd2, has_ligand=False,
+                                      log_errors=[], log_info={})
+    joined = " ".join(errors2)
+    check("vacuum build fires SOLVENT_NOT_ADDED",
+          "SOLVENT_NOT_ADDED" in joined, repr(errors2))
+    check("vacuum build reports count 10",
+          "only 10 water" in joined, repr(errors2))
+    check("vacuum build: SOLVENT_NOT_ADDED is the only error",
+          len(errors2) == 1, repr(errors2))
+
+
+# ---- (7) validate: CROSS_GAP_SPURIOUS_BOND -------------------------------
+
+def test_validate_cross_gap(tmp: Path):
+    # Long bond (5.23 A > MAX_BOND_ANGSTROM 3.0) -> CROSS_GAP fires; solvent ok.
+    rd = _solvent_run_dir(tmp, "v_gap", 150)
+    validation, errors = W.validate(
+        rd, has_ligand=False, log_errors=[],
+        log_info={"bond_lengths_angstrom": [1.5, 5.23]})
+    joined = " ".join(errors)
+    check("long bond fires CROSS_GAP_SPURIOUS_BOND",
+          "CROSS_GAP_SPURIOUS_BOND" in joined, repr(errors))
+    check("CROSS_GAP reports the long length 5.23",
+          "5.23" in joined, repr(errors))
+    check("CROSS_GAP excludes the legit 1.5 A bond",
+          "1.5" not in joined.split("5.23")[0], repr(errors))
+    check("CROSS_GAP is the only error (solvent ok)",
+          len(errors) == 1, repr(errors))
+
+    # All bonds <= 3.0 A (incl. an S-S at 2.05) -> no CROSS_GAP, clean.
+    rd2 = _solvent_run_dir(tmp, "v_nogap", 150)
+    _, errors2 = W.validate(
+        rd2, has_ligand=False, log_errors=[],
+        log_info={"bond_lengths_angstrom": [1.21, 2.05, 1.53]})
+    check("normal bonds -> no CROSS_GAP", errors2 == [], repr(errors2))
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -356,6 +486,10 @@ def main():
         test_validate_component_mismatch(tmp)
         test_validate_missing_outputs(tmp)
         test_validate_log_errors_preserved(tmp)
+        test_parse_leap_log_bonds(tmp)
+        test_parse_leap_log_real_fixture()
+        test_validate_solvent(tmp)
+        test_validate_cross_gap(tmp)
 
     total = PASS + FAIL
     print(f"\n{total} assertions: {PASS} PASS, {FAIL} FAIL")

@@ -197,6 +197,26 @@ def residue_labels(top_path: Path) -> list[str] | None:
     return m.group(1).split()
 
 
+# --- Solvent / geometry gate thresholds (Research_AMBER_Failure_Modes P1) ---
+# solvateoct must add explicit waters; a build with ~none means PME MD would run
+# in vacuum. Counted STRUCTURALLY from comp_oct's RESIDUE_LABEL block — the
+# leap.log "Added N residues" line shares the brittleness that made
+# SYSTEM_NOT_NEUTRAL vacuous, so it stays advisory (solvent_residues_added), not
+# the gate. Real runs add 1890-8290 waters; the floor sits far below any real
+# build and far above zero.
+WATER_RESNAMES = frozenset({"WAT", "HOH", "TIP3", "TP3", "T3P", "TIP4",
+                            "T4E", "OPC", "SPC", "SPE", "SOL"})
+SOLVENT_FLOOR = 100
+
+# A missing-residue gap / chain break without a TER card makes tleap bond across
+# the gap; it surfaces only as a `check` WARNING ("There is a bond of N angstroms
+# between ...") that parse_leap_log would otherwise drop. A real covalent bond is
+# ~1-2 A (an S-S disulfide ~2.05 A); a captured length beyond this bound is a
+# spurious cross-gap bond. The only legit >3 A `bond` is an explicit
+# disulfide/covalent-ligand command, which this wrapper never issues.
+MAX_BOND_ANGSTROM = 3.0
+
+
 # ---- leap.in generation --------------------------------------------------
 
 def build_leap_in(*, protein_pdb: str, ligand_mol2: str | None,
@@ -263,6 +283,15 @@ def parse_leap_log(log_path: Path) -> tuple[list[str], dict[str, Any]]:
         m = re.search(r"Added\s+(\d+)\s+residues", s)
         if m:
             info.setdefault("solvent_residues_added", []).append(int(m.group(1)))
+        # tleap's `check` warns "There is a bond of N angstroms between ..." when
+        # it bonds across an un-TER'd residue gap. Captured here; length-gated in
+        # validate() (CROSS_GAP_SPURIOUS_BOND). The "bond of" anchor is distinct
+        # from "Close contact of N angstroms" (a clash warning, not a bond), so
+        # that benign close-contact line is never captured.
+        mb = re.search(r"bond of\s+([0-9]+(?:\.[0-9]+)?)\s+angstrom", s,
+                       re.IGNORECASE)
+        if mb:
+            info.setdefault("bond_lengths_angstrom", []).append(float(mb.group(1)))
         # NOTE: net neutrality is checked STRUCTURALLY from the comp_oct prmtop
         # CHARGE block in validate() (prmtop_net_charge), NOT scraped here.
         # leap.log's "unperturbed charge" line reports the PRE-neutralization
@@ -350,6 +379,36 @@ def validate(run_dir: Path, has_ligand: bool,
                 f"SYSTEM_NOT_NEUTRAL: comp_oct net charge {net_charge:+.3f} e "
                 "after addions2 — PME requires a neutral cell; neutralization "
                 "did not bring the system to ~0")
+
+    # Solvent presence (SOLVENT_NOT_ADDED). Count water residues STRUCTURALLY in
+    # the comp_oct RESIDUE_LABEL block. solvateoct can silently add ~0 waters,
+    # and the couple of neutralizing ions still push oct>dry so the
+    # DRY_TOPOLOGY_CONTAMINATED gate passes -> explicit-solvent MD would then run
+    # in vacuum. Read structurally (not from the brittle "Added N residues" log
+    # line) for the same reason SYSTEM_NOT_NEUTRAL was moved to the prmtop.
+    oct_labels = residue_labels(run_dir / "comp_oct.top")
+    if oct_labels is not None:
+        n_water = sum(1 for r in oct_labels if r.upper() in WATER_RESNAMES)
+        validation["water_residues"] = n_water
+        if n_water < SOLVENT_FLOOR:
+            errors.append(
+                f"SOLVENT_NOT_ADDED: comp_oct has only {n_water} water residue(s) "
+                f"(expected >= {SOLVENT_FLOOR}); solvateoct added ~none, so "
+                "explicit-solvent MD would run in vacuum")
+
+    # Spurious cross-gap bond (CROSS_GAP_SPURIOUS_BOND). parse_leap_log captured
+    # any "bond of N angstroms" warning from `check`; a length beyond
+    # MAX_BOND_ANGSTROM means tleap bonded across an un-TER'd residue gap / chain
+    # break. (A log-scrape by necessity — tleap's own warning is the only signal;
+    # bounded conservatively so a legit ~2 A bond never trips it.)
+    bond_lengths = log_info.get("bond_lengths_angstrom", [])
+    long_bonds = [round(b, 3) for b in bond_lengths if b > MAX_BOND_ANGSTROM]
+    if long_bonds:
+        errors.append(
+            f"CROSS_GAP_SPURIOUS_BOND: tleap formed bond(s) of {long_bonds} A "
+            f"(> {MAX_BOND_ANGSTROM} A) — a residue gap / chain break without a "
+            "TER card was bonded across; add TER cards or model the missing "
+            "residues")
 
     return validation, errors
 
