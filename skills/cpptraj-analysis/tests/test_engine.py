@@ -7,12 +7,14 @@ HAND-DERIVED by reading the function body in
   ../scripts/wrapper.py
 NOT by re-calling the function under test. Fixtures are written to a tmp dir.
 
-Functions under test (wrapper.py line refs at time of writing):
-  load_xy(path)               line 130
-  _parse_evals(evecs)         line 393
-  _parse_mmgbsa(dat)          line 546
-  prmtop_residue_labels(top)  line 82
-  detect_masks(top, has_lig)  line 94
+Functions under test:
+  load_xy(path)
+  _parse_evals(evecs)
+  _parse_mmgbsa(dat)
+  prmtop_residue_labels(top)
+  detect_masks(top, has_lig)
+  prmtop_radius_set(top)      # GB-radii <-> igb detector
+  gb_radii_check(radii, igb)  # GB-radii <-> igb detector (non-fatal finding)
 
 Run: MPLBACKEND=Agg <conda-python> test_engine.py   (exit 0 = all pass).
 """
@@ -341,8 +343,75 @@ def test_detect_masks_keys_present():
           set(m.keys()) == expected_keys, str(set(m.keys())))
 
 
+# ---- prmtop_radius_set + gb_radii_check (GB-radii <-> igb detector) -------
+# The exact RADIUS_SET value lines tleap writes for the Amber Table 4.1 sets.
+RADIUS_SET_LINES = {
+    "mbondi": "modified Bondi radii (mbondi)",
+    "mbondi2": "H(N)-modified Bondi radii (mbondi2)",
+    "mbondi3": "ArgH and AspGluO modified Bondi2 radii (mbondi3)",
+    "bondi": "Bondi radii (bondi)",
+}
+
+
+def _prmtop_radius(radius_line: str) -> str:
+    return (
+        "%VERSION  VERSION_STAMP = V0001.000\n"
+        "%FLAG TITLE\n%FORMAT(20a4)\ndefault_name\n"
+        "%FLAG RADIUS_SET\n%FORMAT(1a80)\n"
+        f"{radius_line}\n"
+        "%FLAG RESIDUE_LABEL\n%FORMAT(20a4)\nALA GLY MOL\n")
+
+
+def test_prmtop_radius_set():
+    # Each of the four sets -> its parenthetical token (hand-derived).
+    for token, line in RADIUS_SET_LINES.items():
+        top = _write(f"rad_{token}.prmtop", _prmtop_radius(line))
+        check(f"radius_set parses ({token})",
+              W.prmtop_radius_set(top) == token, repr(W.prmtop_radius_set(top)))
+    # No RADIUS_SET flag -> None.
+    noflag = _write("rad_noflag.prmtop",
+                    "%FLAG POINTERS\n%FORMAT(10I8)\n   1 2 3\n")
+    check("radius_set no flag -> None", W.prmtop_radius_set(noflag) is None,
+          repr(W.prmtop_radius_set(noflag)))
+    # Value line without a parenthetical token -> None (never guess).
+    notok = _write("rad_notok.prmtop",
+                   "%FLAG RADIUS_SET\n%FORMAT(1a80)\nsome radii no token\n"
+                   "%FLAG RESIDUE_LABEL\n%FORMAT(20a4)\nALA\n")
+    check("radius_set no token -> None", W.prmtop_radius_set(notok) is None,
+          repr(W.prmtop_radius_set(notok)))
+    # Missing file -> None.
+    check("radius_set missing file -> None",
+          W.prmtop_radius_set(Path("/no/such.prmtop")) is None)
+
+
+def test_gb_radii_check():
+    # igb=5 expects mbondi2; mbondi is the shipping reality -> MISMATCH + finding.
+    r = W.gb_radii_check("mbondi", 5)
+    check("igb5+mbondi consistent False", r["consistent"] is False, str(r))
+    check("igb5+mbondi required mbondi2", r["required"] == "mbondi2", str(r))
+    check("igb5+mbondi has GB_RADII_IGB_MISMATCH finding",
+          "GB_RADII_IGB_MISMATCH" in r.get("finding", ""), str(r))
+    # igb=5 + mbondi2 -> consistent, no finding.
+    r2 = W.gb_radii_check("mbondi2", 5)
+    check("igb5+mbondi2 consistent True", r2["consistent"] is True, str(r2))
+    check("igb5+mbondi2 no finding", "finding" not in r2, str(r2))
+    # igb=1 + mbondi -> consistent (Table 4.1).
+    check("igb1+mbondi consistent True",
+          W.gb_radii_check("mbondi", 1)["consistent"] is True, "")
+    # radius_set None -> consistent None, NEVER a spurious finding.
+    r4 = W.gb_radii_check(None, 5)
+    check("radius_set None -> consistent None", r4["consistent"] is None, str(r4))
+    check("radius_set None -> no finding", "finding" not in r4, str(r4))
+    # Unknown igb -> required None -> no finding, no crash.
+    r5 = W.gb_radii_check("mbondi", 99)
+    check("unknown igb -> required None", r5["required"] is None, str(r5))
+    check("unknown igb -> no finding", "finding" not in r5, str(r5))
+
+
 def main() -> int:
     tests = (
+        test_prmtop_radius_set,
+        test_gb_radii_check,
         test_load_xy_empty_file,
         test_load_xy_missing_file,
         test_load_xy_comment_blank_only,

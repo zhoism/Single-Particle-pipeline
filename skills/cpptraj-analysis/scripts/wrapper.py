@@ -41,6 +41,59 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ALL_ANALYSES = ["rmsd", "rmsf", "rg", "sasa", "dssp", "hbond", "distmat",
                 "cluster", "pca", "fel", "thermo", "mmgbsa"]
 
+# --- MM-GBSA implicit-solvent model + GB-radii consistency (Table 4.1) -----
+# Single source of truth for the igb used to build mmgbsa.in AND the radii
+# detector below, so the check can never drift from the actual run.
+# igb=5 = Onufriev-Bashford-Case GB^OBC (II).
+MMGBSA_IGB = 5
+
+# Amber26 Table 4.1: each GB model is parameterized for one PBRadii set; running
+# a prmtop built with a different RADIUS_SET silently degrades the GB solvation
+# term. The token in the prmtop's RADIUS_SET line ("...(mbondi)") is the key.
+IGB_RADIUS_SET = {1: "mbondi", 2: "mbondi2", 5: "mbondi2", 7: "bondi",
+                  8: "mbondi3"}
+
+
+def prmtop_radius_set(top_path: Path) -> str | None:
+    """The PBRadii set token from a prmtop's %FLAG RADIUS_SET value line, e.g.
+    'modified Bondi radii (mbondi)' -> 'mbondi'. The parenthetical token is the
+    reliable key across all four sets (mbondi/mbondi2/mbondi3/bondi). Returns
+    None on any parse failure (callers treat None as 'could not verify')."""
+    try:
+        text = top_path.read_text()
+    except (OSError, UnicodeError):
+        return None
+    m = re.search(r"%FLAG RADIUS_SET\s*\n%FORMAT\([^)]*\)\s*\n([^\n]*)", text)
+    if not m:
+        return None
+    # The set token is the LAST parenthetical on the line — mbondi2/mbondi3 carry
+    # an earlier "(N)" / "(Bondi2)" aside (e.g. "H(N)-modified Bondi radii
+    # (mbondi2)"), so a first-match grab would wrongly return 'n'.
+    toks = re.findall(r"\(([A-Za-z0-9]+)\)", m.group(1))
+    return toks[-1].lower() if toks else None
+
+
+def gb_radii_check(radius_set: str | None, igb: int) -> dict[str, Any]:
+    """NON-FATAL consistency record between a prmtop's RADIUS_SET and the GB igb.
+    Returns {igb, radius_set, required, consistent[, finding]}. `consistent` is
+    None when the radius set could not be read (never a spurious mismatch).
+
+    Decision 2026-06-27: this stays a non-fatal FINDING — the fatal gate and the
+    mbondi2 fix both shift the reported MM-GBSA dG and need a re-baseline, so the
+    fix is deferred (see handoffs/Next_Session_Prompt_GB_Radii_Fix.md). To flip
+    it fatal once the fix lands, append out['finding'] to validate()'s errors."""
+    required = IGB_RADIUS_SET.get(igb)
+    consistent = (radius_set == required) if radius_set is not None else None
+    out: dict[str, Any] = {"igb": igb, "radius_set": radius_set,
+                           "required": required, "consistent": consistent}
+    if radius_set is not None and required is not None and radius_set != required:
+        out["finding"] = (
+            f"GB_RADII_IGB_MISMATCH: prmtop RADIUS_SET '{radius_set}' but igb="
+            f"{igb} expects '{required}' (Amber Table 4.1); the GB solvation term "
+            "is computed under mismatched radii. NON-FATAL — deferred fix + dG "
+            "re-baseline tracked in Next_Session_Prompt_GB_Radii_Fix.")
+    return out
+
 
 # ---- Envelope ------------------------------------------------------------
 
@@ -518,9 +571,18 @@ def a_mmgbsa(ctx):
         f"  startframe=1, endframe={end}, interval={intval}, verbose=1,\n"
         "/\n"
         "&gb\n"
-        "  igb=5, saltcon=0.100,\n"
+        f"  igb={MMGBSA_IGB}, saltcon=0.100,\n"
         "/\n")
     (d / "mmgbsa.in").write_text(mmin)
+    # Non-fatal GB-radii <-> igb consistency detector (the tripwire). The MM-GBSA
+    # topologies are built with default mbondi radii but igb=5 expects mbondi2
+    # (Amber Table 4.1) -> mismatch on every run today; surfaced here without
+    # reddening the run (fix + dG re-baseline deferred — see gb_radii_check).
+    gb_radii = gb_radii_check(prmtop_radius_set(ctx["out_dir"] / "comp_dry.top"),
+                              MMGBSA_IGB)
+    ctx["gb_radii"] = gb_radii
+    if gb_radii.get("finding"):
+        print(f"[mmgbsa] {gb_radii['finding']}", file=sys.stderr)
     cmd = [mmpbsa, "-O", "-i", "mmgbsa.in", "-o", "mmgbsa.dat",
            "-sp", ctx["comp_oct_top"], "-cp", ctx["comp_dry_top"],
            "-rp", ctx["protein_top"], "-lp", ctx["ligand_top"],
@@ -537,8 +599,10 @@ def a_mmgbsa(ctx):
         ax.set_ylabel("kcal/mol")
         ax.set_title(f"MM-GBSA ΔG = {dG:.2f} kcal/mol")
         fig.tight_layout(); fig.savefig(d/"mmgbsa.png", dpi=150); plt.close(fig)
-    ctx["result"]("mmgbsa", d/"mmgbsa.dat", d/"mmgbsa.png", ok,
-                  note=(f"dG={dG:.2f} kcal/mol" if ok else "parse failed"))
+    note = f"dG={dG:.2f} kcal/mol" if ok else "parse failed"
+    if gb_radii.get("finding"):
+        note += "; " + gb_radii["finding"]
+    ctx["result"]("mmgbsa", d/"mmgbsa.dat", d/"mmgbsa.png", ok, note=note)
     if ok:
         ctx["mmgbsa_dG"] = dG
 
@@ -709,7 +773,8 @@ def main() -> None:
     core_ok = core.issubset(set(produced))
     emit_and_exit(ok=core_ok, dry_run=False, outputs=outputs,
                   validation={"produced": produced, "failed": failed,
-                              "nframes": nframes},
+                              "nframes": nframes,
+                              "gb_radii": ctx.get("gb_radii")},
                   errors=errors, code=0 if core_ok else 3)
 
 
