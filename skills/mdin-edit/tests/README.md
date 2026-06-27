@@ -67,7 +67,8 @@ re-verified green:
    Caught by the harness's cross-version checks. → builtin `open(newline="")`.
 
 Plus a harness/spec bug it caught about *itself*: `temp0` "at-target" must account
-for the coupled `&wt value2` (heat-3 `temp0=300` still edits `value2` 310→300).
+for the coupled `&wt value2` (editing `temp0` on a heat stage can rewrite `value2`
+even when `temp0` itself is unchanged).
 
 ## Status snapshot
 Oracle self-test 38/38 · Tier-1 ~240k assertions, 0 failures, full status+code

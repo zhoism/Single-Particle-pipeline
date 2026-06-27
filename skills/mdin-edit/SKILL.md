@@ -34,8 +34,9 @@ prepared.
   record the change.
 - Tuning an existing mdin set (e.g. lengthen production, lower the cutoff, ramp to a new
   target temperature) without hand-editing files and risking a silent typo.
-- Aligning the known heat-3 `temp0`/`&wt value2` inconsistency by setting `temp0` (the
-  `&wt` ramp end is coupled automatically).
+- Keeping `temp0` and the `&wt` ramp end in lockstep on heat stages — editing `temp0`
+  couples the ramp end automatically, and a *pre-existing* mismatch is surfaced for a
+  human decision rather than silently overwritten (see the coherence gate below).
 
 ## Inputs
 
@@ -49,6 +50,8 @@ prepared.
 | `--disable-restraints` | flag | no | Turn positional restraints **off** in `--stage`: sets `ntr=0` (leaves the now-inert `restraint_wt`/`restraintmask`). |
 | `--restraint-wt` | number | with enable | Force constant (kcal/mol·Å²) for `--enable-restraints`. |
 | `--restraintmask` | string | with enable | Atom-mask string for `--enable-restraints` (e.g. `'!:WAT,Cl-,K+,Na+ & !@H='`). No `"`, `'`, `/`, or newline. |
+| `--couple` | flag | no | Only with `--param temp0`. On a heat stage whose `&wt value2` was **already** incoherent with `temp0`, set `value2` to the new `temp0` (cohere it). Mutually exclusive with `--keep-value2`. |
+| `--keep-value2` | flag | no | Only with `--param temp0`. On a pre-incoherent heat stage, edit `temp0` only and leave `value2` untouched (preserve the deliberate mismatch; a non-blocking WARN records it). |
 | `--dry-run` | flag | no | Plan + validate the edit and print the would-be result (incl. the `nstlim` output schedule); write nothing, log nothing. With `--submit`: plan the run (rewrite + reduce) but invoke no pmemd. |
 | `--submit` | flag | no | Run the **already-edited** set locally to prove it runs (separate mode; `--stage/--param/--value` not needed). See **Submit** below. |
 | `--reduce-nstlim` | int | no | `nstlim` for the `--submit` smoke (default `120`; `≥100` so the MC barostat is happy on the NPT stages). |
@@ -72,7 +75,7 @@ Single JSON envelope on stdout; stderr is human-readable per-file progress.
       {"file": "heat-3.in", "status": "edited",
        "edits": [
          {"namelist": "cntrl", "param": "temp0",  "old": "300.0", "new": "310.0", "changed": true},
-         {"namelist": "wt",    "param": "value2", "old": "310.0", "new": "310.0", "changed": false}
+         {"namelist": "wt",    "param": "value2", "old": "300.0", "new": "310.0", "changed": true}
        ]},
       {"file": "press-3.in", "status": "edited",
        "edits": [{"namelist": "cntrl", "param": "temp0", "old": "300.0", "new": "310.0", "changed": true}]},
@@ -112,6 +115,14 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
   editing `temp0` also sets the ramp end `value2` (the `value1` ramp start is never touched).
   In a **constant-T** stage (relax/prod: `tempi` present, no ramp), editing `temp0` also sets
   `tempi` so `tempi == temp0`. Pressurization stages (no `tempi`, no ramp) get just `temp0`.
+- **Coherence gate (heat `value2`).** Coupling silently rewrites `value2` *only when it was
+  already coherent* with `temp0` (within 0.5 K, the validator's threshold). If `value2` was
+  **already incoherent** (a deliberate pre-existing mismatch), the skill refuses to silently
+  clobber it: the stage returns `status: needs_human`, the whole batch halts `ok:false` with
+  `EDIT_HALTED: HEAT_TEMP0_INCOHERENT` and `outputs.needs_human` (writing nothing), and the
+  human re-runs with `--couple` (cohere `value2`) or `--keep-value2` (edit `temp0` only). This
+  mirrors `amber-recover`'s `needs_human` halt — the decision belongs to a human, not a silent
+  default. (Constant-T `tempi` coupling is **not** gated — it stays silent.)
 - **`nstlim` output schedule.** After an `nstlim` edit the envelope carries an
   `output_schedule` (`ntwx → trajectory_frames`, `ntpr → energy_outputs`) plus advisory
   warnings on zero / very-sparse / non-multiple sampling (`ntwx=0` = trajectory off, no warn).
@@ -122,7 +133,7 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
 - **Post-edit self-check.** The result is re-parsed with an independent parser and the new
   value asserted; a mismatch is a hard `SELF_CHECK_FAILED` and **nothing is written**.
 - **Advisory validation.** The vendored `check_amber` logic runs over the result for
-  transparency (e.g. confirming the heat-3 mismatch is gone). Its findings never gate `ok`;
+  transparency (e.g. confirming heat-3's `temp0`/`&wt value2` stay coherent after an edit). Its findings never gate `ok`;
   a FAIL on the exact value you deliberately set within bounds is downgraded to a WARN.
 
 ## Errors
@@ -142,6 +153,9 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
 | `AMBIGUOUS_PARAM` | The param appears more than once in the target namelist. | Manual inspection — the engine refuses to guess. |
 | `NAMELIST_NOT_FOUND` | No `&cntrl` block / unterminated namelist. | Fix the file structure. |
 | `SELF_CHECK_FAILED` | Post-edit re-parse didn't read the rendered value. | Internal backstop — file untouched; report it (regex/format edge case). |
+| `EDIT_HALTED: HEAT_TEMP0_INCOHERENT` | A `temp0` edit hit a heat stage whose `&wt value2` was **already** incoherent with `temp0`. Whole batch halts, nothing written; `outputs.needs_human` carries the per-stage `old_temp0`/`old_value2`/`new_temp0`. | Re-run with `--couple` (set `value2` to the new `temp0`) or `--keep-value2` (edit `temp0` only). |
+| `FLAG_CONFLICT` | Both `--couple` and `--keep-value2` given. | Pass at most one. |
+| `FLAG_NOT_APPLICABLE` | `--couple`/`--keep-value2` used without `--param temp0`. | Those flags apply only to a `temp0` edit. |
 
 ## How it works
 
@@ -244,9 +258,10 @@ The whole point of this skill is to *never make a silent mistake* (the
 2. **Idempotency** — re-run is byte-identical; re-run reports `unchanged`; trailing newline intact.
 3. **Out-of-bounds** — `dt = 0.01` rejected; file unchanged (no half-write).
 4. **Wrong-param** — `dt` on min1 rejected; `dt` still absent (no append).
-5. **Ext-A** — `temp0 → 310` `group:third-onward`: heat-3 `value2` coupled (value1 preserved),
-   relax/prod get no `&wt`, heat-1/2 + press-1 untouched, heat-3 mismatch WARN gone. **5b**
-   exercises the coupling rewrite (`temp0 → 305` → `value2 = 305.0`).
+5. **Ext-A** — `temp0 → 310` `group:third-onward`: heat-3 `value2` coupled to the new temp0
+   (value1/ramp-start preserved → heat-3 stays coherent, validator confirms), relax/prod get no
+   `&wt`, heat-1/2 + press-1 untouched. **5b** exercises the coupling rewrite (`temp0 → 305` →
+   `value2 = 305.0`); **5c** is the hermetic, demo-independent twin (synthetic coherent fixture).
 6. **Ext-B** — `cut → 7.0`: `ok:true` despite the validator's <8 Å FAIL, with a deliberate WARN.
 7. **Ext-C** — `restraint_wt 5.0 → 1.0` on press-1 (mask line intact); **7b** negative on relax
    (ntr=0) rejected; **7c** `group:all` skips the ntr=0 files and edits the rest.

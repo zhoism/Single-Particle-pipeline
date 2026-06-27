@@ -29,7 +29,7 @@ NPT equilibration; `prod` is the production run.
 | Press 1 | press-1.in | 0 | NPT (ntb2 ntp1) | 0.002 | 9.0 | 3 / 2.0 | 2·1·2 | 100 | **1** · 5.0 | — |
 | Heat 2 | heat-2.in | 0 | NVT | 0.002 | 9.0 | 3 / 2.0 | 1·0·2 | 200 (100) | **1** · 5.0 | 1 / TEMP0 100→200 |
 | Press 2 | press-2.in | 0 | NPT | 0.002 | 9.0 | 3 / 2.0 | 2·1·2 | 200 | **1** · 5.0 | — |
-| Heat 3 | heat-3.in | 0 | NVT | 0.002 | 9.0 | 3 / 2.0 | 1·0·2 | **300** (200) | **1** · 5.0 | 1 / TEMP0 200→**310** ⚠️ |
+| Heat 3 | heat-3.in | 0 | NVT | 0.002 | 9.0 | 3 / 2.0 | 1·0·2 | 300 (200) | **1** · 5.0 | 1 / TEMP0 200→300 |
 | Press 3 | press-3.in | 0 | NPT | 0.002 | 9.0 | 3 / 2.0 | 2·1·2 | 300 | **1** · 5.0 | — |
 | Relax | relax.in | 0 | NPT | 0.002 | 9.0 | 3 / 2.0 | 2·1·2 | 300 (300) | 0 · 0.0 | — |
 | Prod | prod.in | 0 | NPT | 0.002 | 9.0 | 3 / 2.0 | 2·1·2 | 300 (300) | 0 · 0.0 | — |
@@ -92,18 +92,33 @@ SHAKE-aware `dt` cap, the `temp0`↔`tempi` coupling, the restraint transitions,
   ramped `&wt` value, **`&cntrl temp0` should equal the ramp end `value2`** — otherwise the
   two disagree about the final temperature.
 
-## ⚠️ The heat-3 inconsistency (and why the advisor's Task 3 is clever)
+## Why `mdin-edit` couples `temp0` ↔ `&wt value2` on heat stages
 
-`heat-3.in` sets `&cntrl temp0 = 300.0` but its `&wt TEMP0` ramp ends at `value2 = 310.0` —
-a 10 K disagreement (heat-1 is 100/100 and heat-2 is 200/200, both consistent). The system
-actually ramps to 310 K while `temp0` claims 300 K.
+`heat-3.in` is coherent: `&cntrl temp0 = 300.0` and its `&wt TEMP0` ramp ends at
+`value2 = 300.0` (ramp 200 → 300 K), matching heat-1 (100/100) and heat-2 (200/200).
 
-The advisor's instruction *"set the target temperature to 310 K from the third stage onward"*
-sets `temp0 = 310` on {heat-3, press-3, relax, prod}. On heat-3 that **aligns `temp0` with the
-existing `&wt value2 = 310`, resolving the bug**. This is exactly why `mdin-edit` couples the
-two: editing `temp0` in an `nmropt=1` heating stage also writes the `&wt value2`, so they can
-never silently drift apart again. (The complementary fix — `temp0 = 300` on heat-3 — would
-instead pull `value2` down to 300; the coupling handles both directions.)
+> **History:** the advisor's original `heat-3.in` had `value2 = 310.0` — a 10 K
+> disagreement with `temp0 = 300`. That was a **typo**, not an intended target (confirmed
+> 2026-06-26 and corrected in the demo, vault `51e15c1`); do not treat the old 300/310 as
+> ground truth.
+
+Because the two *can* silently drift (a hand-edit of `temp0` that forgets the ramp end is
+exactly how the 310 typo would arise), `mdin-edit` **couples** them: editing `temp0` in an
+`nmropt=1` heating stage also rewrites the `&wt value2` to match, so `&cntrl` and the ramp
+endpoint can never disagree after an edit. The ramp START (`value1`/`tempi`) is left alone.
+
+**The coherence gate.** Coupling is silent only when `value2` was *already coherent* with
+`temp0` (within 0.5 K). If you hand an `mdin-edit` a heat stage that is *already* incoherent
+(e.g. the old 300/310), a `temp0` edit does **not** silently overwrite `value2` — it returns
+`status: needs_human` and the batch halts (`EDIT_HALTED: HEAT_TEMP0_INCOHERENT`, nothing
+written). Re-run with `--couple` (cohere `value2`) or `--keep-value2` (edit `temp0` only,
+keep the mismatch).
+
+*Scope:* the gate (like the coupling it guards) recognizes the advisor's form — a single-
+quoted `type = 'TEMP0'` ramp block with plain-decimal `value2`. Other Fortran spellings the
+parser doesn't yet read — double-quoted `"TEMP0"`, `d`-exponent literals like `3.05d2` — fall
+through uncoupled and ungated (tracked under arbitrary-mdin-shapes future work; the same
+parser scope bounds the vendored validator, so gate and validator stay consistent).
 
 ## `submit.sh` portability
 
