@@ -272,11 +272,31 @@ def test_parse_real_golden_xml():
               str(validation["phantom_ligands"]))
 
 
+def test_build_plip_cmd():
+    """The PLIP argv must always carry --nohydro (keep tleap's authoritative,
+    deterministic hydrogens; without it PLIP re-protonates via OpenBabel
+    non-deterministically). Hard-asserted in build_plip_cmd as a regression
+    tripwire — verify the flag is present and positioned as an option, and that
+    the required-flags set is what we expect."""
+    cmd = W.build_plip_cmd("plip", "complex_frame.pdb", "report")
+    check("argv carries --nohydro", "--nohydro" in cmd, str(cmd))
+    check("argv carries -x (XML)", "-x" in cmd, str(cmd))
+    check("argv carries -t (text)", "-t" in cmd, str(cmd))
+    check("argv: -f names the input pdb",
+          cmd[cmd.index("-f") + 1] == "complex_frame.pdb", str(cmd))
+    check("argv: -o names the out subdir",
+          cmd[cmd.index("-o") + 1] == "report", str(cmd))
+    check("required-flags constant is exactly (-t,-x,--nohydro)",
+          W.PLIP_REQUIRED_FLAGS == ("-t", "-x", "--nohydro"),
+          str(W.PLIP_REQUIRED_FLAGS))
+
+
 def main() -> int:
     for fn in (test_normalize, test_idempotent_and_clean_roundtrip,
                test_find_variants, test_count_ligand, test_parse_synth,
                test_build_outputs_phantom, test_build_outputs_missing_ligand,
-               test_unmapped_residue_gate, test_parse_real_golden_xml):
+               test_unmapped_residue_gate, test_build_plip_cmd,
+               test_parse_real_golden_xml):
         fn()
     print(f"\nplip-profile engine tests: {PASS} passed, {FAIL} failed")
     if FAIL:

@@ -383,6 +383,28 @@ def extract_frame_pdb(cpptraj: str, cwd: Path, frame_1based: int,
 
 # ---- PLIP ----------------------------------------------------------------
 
+# Required PLIP flags. --nohydro is LOAD-BEARING: tleap already placed (and MD
+# equilibrated) the hydrogens, and they are authoritative. Without --nohydro PLIP
+# strips them and re-adds polar H via OpenBabel, which is non-deterministic ->
+# it breaks this skill's advertised byte-identical re-runs and can flip
+# H-bond / salt-bridge calls frame-to-frame. (-t text report, -x XML report.)
+# Trade-off acknowledged: keeping tleap H still leaves OpenBabel responsible for
+# bond perception, so this fixes determinism, not every perception risk.
+PLIP_REQUIRED_FLAGS: tuple[str, ...] = ("-t", "-x", "--nohydro")
+
+
+def build_plip_cmd(plip: str, pdb_name: str, out_subdir: str) -> list[str]:
+    """Construct the PLIP argv from PLIP_REQUIRED_FLAGS. The single source of
+    truth for --nohydro is the constant + its unit test; the post-build check
+    only backstops a future edit that builds the argv inline and forgets a flag
+    (it cannot fire while the argv is built by splatting the constant)."""
+    cmd = [plip, "-f", pdb_name, *PLIP_REQUIRED_FLAGS, "-o", out_subdir]
+    missing = [f for f in PLIP_REQUIRED_FLAGS if f not in cmd]
+    if missing:
+        raise StepFailure(f"PLIP argv missing required flag(s): {missing}")
+    return cmd
+
+
 def run_plip(plip: str, pdb_name: str, out_subdir: str, cwd: Path) -> Path:
     """Run PLIP (XML + TXT reports) on a dry complex PDB. Relative paths under a
     space-containing cwd (PLIP tokenizes safely on relative names — proven in
@@ -393,7 +415,7 @@ def run_plip(plip: str, pdb_name: str, out_subdir: str, cwd: Path) -> Path:
     od.mkdir(parents=True, exist_ok=True)
     log = cwd / "plip.log"
     with log.open("w") as lf:
-        r = subprocess.run([plip, "-f", pdb_name, "-t", "-x", "-o", out_subdir],
+        r = subprocess.run(build_plip_cmd(plip, pdb_name, out_subdir),
                            cwd=str(cwd), stdout=lf, stderr=subprocess.STDOUT)
     if r.returncode != 0:
         tail = log.read_text(errors="replace")[-800:]
@@ -549,6 +571,7 @@ def main() -> None:
             "strip_mask": STRIP_MASK,
             "normalization_variants": sorted(AMBER_VARIANTS),
             "interaction_categories": [lbl for _, lbl in INTERACTION_CATEGORIES],
+            "plip_flags": list(PLIP_REQUIRED_FLAGS),
             "cpptraj": cpptraj, "plip": plip,
         }
         emit_and_exit(ok=True, dry_run=True, outputs={"plan": plan},
