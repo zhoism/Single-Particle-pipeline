@@ -409,6 +409,7 @@ class FileResult:
     new_text: Optional[str] = None    # in-memory result (None if no write needed)
     validation: dict | None = None    # advisory vendored verdict
     output_schedule: dict | None = None  # nstlim → trajectory/energy schedule (nstlim edits)
+    needs_human: dict | None = None   # set with status="needs_human": pre-existing temp0/&wt incoherence
 
 
 def validate_text(text: str) -> Any:
@@ -423,9 +424,15 @@ def validate_text(text: str) -> Any:
         os.unlink(tf.name)
 
 
-def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResult:
+def plan_file_edit(path: Path, param: str, rendered: str, raw: str,
+                   couple_mode: Optional[str] = None) -> FileResult:
     """Compute (in memory) the edit for one file. Writes NOTHING. Encodes expected
-    conditions as status/reason on the result rather than raising."""
+    conditions as status/reason on the result rather than raising.
+
+    couple_mode (temp0 on a heat stage with a pre-existing temp0/&wt mismatch):
+      None         → halt with status="needs_human" (default; don't silently couple)
+      "couple"     → set &wt value2 to the new temp0 (cohere it)
+      "keep-value2"→ edit temp0 only, leave value2 as-is (preserve the mismatch)."""
     name = path.name
     # builtin open(newline="") preserves CRLF/LF exactly (byte-minimal) AND works on
     # Python 3.11 — the conda env OpenClaw runs (Path.read_text(newline=) is 3.13+).
@@ -478,14 +485,34 @@ def plan_file_edit(path: Path, param: str, rendered: str, raw: str) -> FileResul
     if param == "temp0":
         wt_span = temp0_wt_span(text2)
         if wt_span is not None and num(cntrl_get(text2, "nmropt")) == 1:
-            out2 = set_param_in_block(text2, wt_span, "value2", rendered)
-            if out2.ambiguous:
-                return FileResult(name, "error",
-                                  reason="AMBIGUOUS_PARAM: value2 appears more than once in &wt TEMP0")
-            if out2.found:
-                text2 = out2.text
-                edits.append({"namelist": "wt", "param": "value2",
-                              "old": out2.old, "new": out2.new, "changed": out2.changed})
+            # Coherence gate (Phase 2). Compare the OLD temp0 (out.old — text2 already
+            # holds the new value) against the OLD &wt value2 (read from the ORIGINAL
+            # text). If they DISAGREE before this edit (>0.5 K, the exact threshold
+            # check_amber uses), silently rewriting value2 would clobber a deliberate,
+            # pre-existing setting — so halt for a human unless they pre-authorized.
+            old_value2 = parsed_wt_temp0_value2(text)
+            t0n, v2n = num(out.old), num(old_value2)
+            pre_mismatch = (t0n is not None and v2n is not None
+                            and abs(v2n - t0n) > 0.5)
+            if pre_mismatch and couple_mode is None:
+                return FileResult(
+                    name, "needs_human",
+                    reason=(f"HEAT_TEMP0_INCOHERENT: temp0={out.old} and &wt "
+                            f"value2={old_value2} disagree before this edit"),
+                    needs_human={"stage": name, "old_temp0": out.old,
+                                 "old_value2": old_value2, "new_temp0": rendered})
+            # Couple value2 to the new temp0 unless the human chose to keep it on a mismatch.
+            if not pre_mismatch or couple_mode == "couple":
+                out2 = set_param_in_block(text2, wt_span, "value2", rendered)
+                if out2.ambiguous:
+                    return FileResult(name, "error",
+                                      reason="AMBIGUOUS_PARAM: value2 appears more than once in &wt TEMP0")
+                if out2.found:
+                    text2 = out2.text
+                    edits.append({"namelist": "wt", "param": "value2",
+                                  "old": out2.old, "new": out2.new, "changed": out2.changed})
+            # else couple_mode == "keep-value2" on a pre-mismatch → leave value2 untouched
+            # (the advisory validation below will WARN about the residual mismatch).
         elif (wt_span is None and num(cntrl_get(text2, "nmropt")) != 1
               and cntrl_get(text2, "tempi") is not None):
             # constant-T only: nmropt!=1 guards against a heat-like stage whose TEMP0
@@ -946,6 +973,14 @@ def main() -> None:
     p.add_argument("--restraintmask", default=None,
                    help="Atom-mask string for --enable-restraints (e.g. "
                         "'!:WAT,Cl-,K+,Na+ & !@H=').")
+    p.add_argument("--couple", action="store_true",
+                   help="With --param temp0 on a heat stage whose &wt value2 was ALREADY "
+                        "incoherent with temp0: set value2 to the new temp0 (cohere it). "
+                        "Without this (or --keep-value2) such a stage HALTS for a human.")
+    p.add_argument("--keep-value2", action="store_true",
+                   help="With --param temp0 on a heat stage whose &wt value2 was ALREADY "
+                        "incoherent: edit temp0 only, leaving value2 untouched (preserve "
+                        "the deliberate mismatch).")
     args = p.parse_args()
 
     # --- Exactly one operation mode: edit / enable / disable / submit. ---
@@ -955,6 +990,18 @@ def main() -> None:
         emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
                       errors=["MODE_CONFLICT: use exactly one of --param / "
                               "--enable-restraints / --disable-restraints / --submit"])
+
+    # --- Coupling-decision flags (--couple / --keep-value2): only meaningful for a
+    #     temp0 edit. Reject mis-use loudly rather than silently ignoring a flag that
+    #     changes write semantics. ---
+    if args.couple and args.keep_value2:
+        emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                      errors=["FLAG_CONFLICT: use at most one of --couple / --keep-value2"])
+    if (args.couple or args.keep_value2) and (args.param is None
+                                              or args.param.lower() != "temp0"):
+        emit_and_exit(ok=False, dry_run=args.dry_run, code=1,
+                      errors=["FLAG_NOT_APPLICABLE: --couple/--keep-value2 apply only to "
+                              "--param temp0"])
 
     # --- Submit mode: run the edited set locally (separate from the edit path). ---
     if args.submit:
@@ -986,9 +1033,11 @@ def main() -> None:
         except EditError as exc:
             emit_and_exit(ok=False, dry_run=args.dry_run, code=1, errors=[str(exc)])
         op_param, op_value = param, rendered
+        couple_mode = ("couple" if args.couple else
+                       "keep-value2" if args.keep_value2 else None)
 
         def plan_one(fp: Path) -> FileResult:
-            return plan_file_edit(fp, param, rendered, raw)
+            return plan_file_edit(fp, param, rendered, raw, couple_mode)
 
     elif args.enable_restraints:
         if args.restraint_wt is None or args.restraintmask is None:
@@ -1063,6 +1112,8 @@ def main() -> None:
             rec["warnings"] = r.warnings
         if r.output_schedule is not None:
             rec["output_schedule"] = r.output_schedule
+        if r.needs_human is not None:
+            rec["needs_human"] = r.needs_human
         if r.reason:
             rec["reason"] = r.reason
         file_records.append(rec)
@@ -1083,6 +1134,24 @@ def main() -> None:
         errs = [r.reason for r in hard_errors if r.reason]
         emit_and_exit(ok=False, dry_run=args.dry_run, code=3,
                       outputs=outputs, validation=validation, errors=errs)
+
+    # 7b. Pre-existing temp0/&wt incoherence anywhere → HALT for a human, write
+    #     NOTHING for the whole batch (same all-or-nothing discipline as hard errors).
+    #     The human re-runs with --couple or --keep-value2 to authorize the resolution.
+    halts = [r for r in results if r.status == "needs_human"]
+    if halts:
+        outputs["needs_human"] = {
+            "reason": "HEAT_TEMP0_INCOHERENT",
+            "detail": (f"{len(halts)} heat stage(s) have a pre-existing temp0/&wt value2 "
+                       "mismatch; refusing to silently auto-couple value2 to the new temp0"),
+            "stages": [r.needs_human for r in halts],
+            "recommendation": ("re-run with --couple to set value2 to the new temp0 (cohere "
+                               "it), or --keep-value2 to edit temp0 only and leave value2 "
+                               "untouched"),
+        }
+        emit_and_exit(ok=False, dry_run=args.dry_run, code=3,
+                      outputs=outputs, validation=validation,
+                      errors=["EDIT_HALTED: HEAT_TEMP0_INCOHERENT"])
 
     # 8. Dry-run → report the plan, write nothing, log nothing.
     if args.dry_run:

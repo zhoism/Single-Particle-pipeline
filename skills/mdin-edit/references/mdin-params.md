@@ -107,6 +107,19 @@ exactly how the 310 typo would arise), `mdin-edit` **couples** them: editing `te
 `nmropt=1` heating stage also rewrites the `&wt value2` to match, so `&cntrl` and the ramp
 endpoint can never disagree after an edit. The ramp START (`value1`/`tempi`) is left alone.
 
+**The coherence gate.** Coupling is silent only when `value2` was *already coherent* with
+`temp0` (within 0.5 K). If you hand an `mdin-edit` a heat stage that is *already* incoherent
+(e.g. the old 300/310), a `temp0` edit does **not** silently overwrite `value2` — it returns
+`status: needs_human` and the batch halts (`EDIT_HALTED: HEAT_TEMP0_INCOHERENT`, nothing
+written). Re-run with `--couple` (cohere `value2`) or `--keep-value2` (edit `temp0` only,
+keep the mismatch).
+
+*Scope:* the gate (like the coupling it guards) recognizes the advisor's form — a single-
+quoted `type = 'TEMP0'` ramp block with plain-decimal `value2`. Other Fortran spellings the
+parser doesn't yet read — double-quoted `"TEMP0"`, `d`-exponent literals like `3.05d2` — fall
+through uncoupled and ungated (tracked under arbitrary-mdin-shapes future work; the same
+parser scope bounds the vendored validator, so gate and validator stay consistent).
+
 ## `submit.sh` portability
 
 `submit.sh` hardcodes `export AMBERHOME=/Application/software/Amber26/pmemd26` — the

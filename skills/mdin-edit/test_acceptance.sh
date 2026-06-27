@@ -45,6 +45,33 @@ fresh() {
   echo "$sc"
 }
 
+# Write a synthetic heat stage (nmropt=1 + a &wt TEMP0 ramp) with a chosen ramp-end
+# value2, so the coupling gate can be exercised on COHERENT ($2=300.0) or pre-
+# INCOHERENT ($2=310.0) fixtures without depending on the external demo. $1=path.
+write_heat() {
+  cat > "$1" <<EOF
+ &cntrl
+  imin = 0,
+  nstlim = 50000,
+  dt = 0.002,
+  cut = 9.0,
+  ntc = 2,
+  ntf = 2,
+  tempi = 200.0,
+  temp0 = 300.0,
+  nmropt = 1,
+ /
+ &wt
+  type = 'TEMP0',
+  istep1 = 0, istep2 = 40000,
+  value1 = 200.0, value2 = $2,
+ /
+ &wt
+  type = 'END',
+ /
+EOF
+}
+
 # assert_ok <envelope.json> <label>
 assert_ok() {
   python3 -c "import json,sys; e=json.load(open('$1')); sys.exit(0 if e.get('ok') else 1)" \
@@ -207,6 +234,100 @@ grep -qx '  temp0 = 305.0,' "$SC/heat-1.in" || fail "5c: temp0 not 305"
 grep -qx '  value1 = 200.0, value2 = 305.0,' "$SC/heat-1.in" \
   || fail "5c: value2 not coupled to 305 (value1 must stay 200)"
 pass "5c hermetic coherent-couple (owns its fixture; value2 follows temp0)"
+
+# ---- Cases 5d-5j: the needs_human coherence gate (Phase 2) -----------------
+# On a heat stage whose &wt value2 was ALREADY incoherent with temp0 (a deliberate
+# pre-existing mismatch), editing temp0 must NOT silently auto-couple value2. It
+# HALTS for a human (status needs_human / EDIT_HALTED, writes nothing) unless the
+# human pre-authorizes --couple (cohere) or --keep-value2 (preserve). All fixtures
+# are synthetic (demo-independent).
+
+echo "[case 5d] gate — pre-incoherent (value2=310) + no flag → needs_human, file untouched" >&2
+SC="$RUN_BASE/gate_halt"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+cp "$SC/heat-1.in" "$SC/.orig"
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 305 \
+  > "$SC/env.json" 2>/dev/null || true
+assert_fail "$SC/env.json" "gate halt" "HEAT_TEMP0_INCOHERENT"
+python3 -c "
+import json,sys
+e=json.load(open('$SC/env.json'))
+nh=e['outputs'].get('needs_human',{}); st=(nh.get('stages') or [{}])[0]
+sys.exit(0 if nh.get('reason')=='HEAT_TEMP0_INCOHERENT'
+         and st.get('old_temp0')=='300.0' and st.get('old_value2')=='310.0'
+         and st.get('new_temp0')=='305.0' else 1)" \
+  || fail "5d: needs_human payload wrong ($(cat "$SC/env.json"))"
+diff "$SC/.orig" "$SC/heat-1.in" >/dev/null || fail "5d: file written despite halt"
+pass "5d gate halt (needs_human payload + no write)"
+
+echo "[case 5e] gate — pre-incoherent + --couple → value2 cohered to 305" >&2
+SC="$RUN_BASE/gate_couple"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 305 --couple \
+  > "$SC/env.json" 2>/dev/null
+assert_ok "$SC/env.json" "gate --couple"
+grep -qx '  temp0 = 305.0,' "$SC/heat-1.in" || fail "5e: temp0 not 305"
+grep -qx '  value1 = 200.0, value2 = 305.0,' "$SC/heat-1.in" || fail "5e: value2 not cohered to 305"
+pass "5e gate --couple (mismatch cohered)"
+
+echo "[case 5f] gate — pre-incoherent + --keep-value2 → temp0 only, value2 stays 310" >&2
+SC="$RUN_BASE/gate_keep"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 305 --keep-value2 \
+  > "$SC/env.json" 2>/dev/null
+assert_ok "$SC/env.json" "gate --keep-value2"
+grep -qx '  temp0 = 305.0,' "$SC/heat-1.in" || fail "5f: temp0 not 305"
+grep -qx '  value1 = 200.0, value2 = 310.0,' "$SC/heat-1.in" || fail "5f: value2 not preserved at 310"
+pass "5f gate --keep-value2 (mismatch preserved, temp0 only)"
+
+echo "[case 5g] gate — --couple + --keep-value2 → FLAG_CONFLICT, untouched" >&2
+SC="$RUN_BASE/gate_conflict"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+cp "$SC/heat-1.in" "$SC/.orig"
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 305 --couple --keep-value2 \
+  > "$SC/env.json" 2>/dev/null || true
+assert_fail "$SC/env.json" "flag conflict" "FLAG_CONFLICT"
+diff "$SC/.orig" "$SC/heat-1.in" >/dev/null || fail "5g: file modified on flag conflict"
+pass "5g FLAG_CONFLICT (untouched)"
+
+echo "[case 5h] gate — --couple with --param dt → FLAG_NOT_APPLICABLE, untouched" >&2
+SC="$RUN_BASE/gate_notapplic"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+cp "$SC/heat-1.in" "$SC/.orig"
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param dt --value 0.001 --couple \
+  > "$SC/env.json" 2>/dev/null || true
+assert_fail "$SC/env.json" "flag not applicable" "FLAG_NOT_APPLICABLE"
+diff "$SC/.orig" "$SC/heat-1.in" >/dev/null || fail "5h: file modified on FLAG_NOT_APPLICABLE"
+pass "5h FLAG_NOT_APPLICABLE (untouched)"
+
+echo "[case 5i] gate — --dry-run over a pre-incoherent stage → needs_human, dry_run:true, no write" >&2
+SC="$RUN_BASE/gate_dryrun"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+cp "$SC/heat-1.in" "$SC/.orig"
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 305 --dry-run \
+  > "$SC/env.json" 2>/dev/null || true
+assert_fail "$SC/env.json" "dry-run gate" "HEAT_TEMP0_INCOHERENT"
+python3 -c "import json,sys;e=json.load(open('$SC/env.json'));sys.exit(0 if e['dry_run'] else 1)" \
+  || fail "5i: dry_run flag not set on gated dry-run"
+diff "$SC/.orig" "$SC/heat-1.in" >/dev/null || fail "5i: dry-run wrote the file"
+pass "5i dry-run gate (needs_human, dry_run:true, no write)"
+
+echo "[case 5j] gate — group:third-onward with ONE incoherent heat-3 → whole batch halts, nothing written" >&2
+SC="$(fresh gate_group)"
+write_heat "$SC/heat-3.in" 310.0          # make ONLY heat-3 pre-incoherent
+for f in press-3 relax prod; do cp "$SC/$f.in" "$SC/.orig-$f"; done
+python3 "$WRAPPER" --md-dir "$SC" --stage group:third-onward --param temp0 --value 305 \
+  > "$SC/env.json" 2>/dev/null || true
+assert_fail "$SC/env.json" "group halt" "HEAT_TEMP0_INCOHERENT"
+for f in press-3 relax prod; do
+  diff "$SC/.orig-$f" "$SC/$f.in" >/dev/null || fail "5j: $f.in written despite batch halt"
+done
+pass "5j group all-or-nothing (no file written when one stage needs_human)"
+
+echo "[case 5k] gate — temp0 NO-OP (300→300) on a pre-incoherent stage still halts" >&2
+# Edge: even when temp0 itself doesn't change, the OLD coupling would have silently
+# rewritten value2 310→300 — so the gate must still fire.
+SC="$RUN_BASE/gate_noop"; rm -rf "$SC" && mkdir -p "$SC"; write_heat "$SC/heat-1.in" 310.0
+cp "$SC/heat-1.in" "$SC/.orig"
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 300 \
+  > "$SC/env.json" 2>/dev/null || true
+assert_fail "$SC/env.json" "gate temp0 no-op" "HEAT_TEMP0_INCOHERENT"
+diff "$SC/.orig" "$SC/heat-1.in" >/dev/null || fail "5k: file written despite halt on temp0 no-op"
+pass "5k gate fires on temp0 no-op over a pre-existing mismatch"
 
 # ---- Case 6: Ext-B — cut → 7.0 -------------------------------------------
 echo "[case 6] Ext-B — cut → 7.0 (accepted with deliberate WARN)" >&2

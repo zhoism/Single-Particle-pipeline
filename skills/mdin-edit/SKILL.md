@@ -34,8 +34,9 @@ prepared.
   record the change.
 - Tuning an existing mdin set (e.g. lengthen production, lower the cutoff, ramp to a new
   target temperature) without hand-editing files and risking a silent typo.
-- Aligning the known heat-3 `temp0`/`&wt value2` inconsistency by setting `temp0` (the
-  `&wt` ramp end is coupled automatically).
+- Keeping `temp0` and the `&wt` ramp end in lockstep on heat stages — editing `temp0`
+  couples the ramp end automatically, and a *pre-existing* mismatch is surfaced for a
+  human decision rather than silently overwritten (see the coherence gate below).
 
 ## Inputs
 
@@ -49,6 +50,8 @@ prepared.
 | `--disable-restraints` | flag | no | Turn positional restraints **off** in `--stage`: sets `ntr=0` (leaves the now-inert `restraint_wt`/`restraintmask`). |
 | `--restraint-wt` | number | with enable | Force constant (kcal/mol·Å²) for `--enable-restraints`. |
 | `--restraintmask` | string | with enable | Atom-mask string for `--enable-restraints` (e.g. `'!:WAT,Cl-,K+,Na+ & !@H='`). No `"`, `'`, `/`, or newline. |
+| `--couple` | flag | no | Only with `--param temp0`. On a heat stage whose `&wt value2` was **already** incoherent with `temp0`, set `value2` to the new `temp0` (cohere it). Mutually exclusive with `--keep-value2`. |
+| `--keep-value2` | flag | no | Only with `--param temp0`. On a pre-incoherent heat stage, edit `temp0` only and leave `value2` untouched (preserve the deliberate mismatch; a non-blocking WARN records it). |
 | `--dry-run` | flag | no | Plan + validate the edit and print the would-be result (incl. the `nstlim` output schedule); write nothing, log nothing. With `--submit`: plan the run (rewrite + reduce) but invoke no pmemd. |
 | `--submit` | flag | no | Run the **already-edited** set locally to prove it runs (separate mode; `--stage/--param/--value` not needed). See **Submit** below. |
 | `--reduce-nstlim` | int | no | `nstlim` for the `--submit` smoke (default `120`; `≥100` so the MC barostat is happy on the NPT stages). |
@@ -112,6 +115,14 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
   editing `temp0` also sets the ramp end `value2` (the `value1` ramp start is never touched).
   In a **constant-T** stage (relax/prod: `tempi` present, no ramp), editing `temp0` also sets
   `tempi` so `tempi == temp0`. Pressurization stages (no `tempi`, no ramp) get just `temp0`.
+- **Coherence gate (heat `value2`).** Coupling silently rewrites `value2` *only when it was
+  already coherent* with `temp0` (within 0.5 K, the validator's threshold). If `value2` was
+  **already incoherent** (a deliberate pre-existing mismatch), the skill refuses to silently
+  clobber it: the stage returns `status: needs_human`, the whole batch halts `ok:false` with
+  `EDIT_HALTED: HEAT_TEMP0_INCOHERENT` and `outputs.needs_human` (writing nothing), and the
+  human re-runs with `--couple` (cohere `value2`) or `--keep-value2` (edit `temp0` only). This
+  mirrors `amber-recover`'s `needs_human` halt — the decision belongs to a human, not a silent
+  default. (Constant-T `tempi` coupling is **not** gated — it stays silent.)
 - **`nstlim` output schedule.** After an `nstlim` edit the envelope carries an
   `output_schedule` (`ntwx → trajectory_frames`, `ntpr → energy_outputs`) plus advisory
   warnings on zero / very-sparse / non-multiple sampling (`ntwx=0` = trajectory off, no warn).
@@ -142,6 +153,9 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
 | `AMBIGUOUS_PARAM` | The param appears more than once in the target namelist. | Manual inspection — the engine refuses to guess. |
 | `NAMELIST_NOT_FOUND` | No `&cntrl` block / unterminated namelist. | Fix the file structure. |
 | `SELF_CHECK_FAILED` | Post-edit re-parse didn't read the rendered value. | Internal backstop — file untouched; report it (regex/format edge case). |
+| `EDIT_HALTED: HEAT_TEMP0_INCOHERENT` | A `temp0` edit hit a heat stage whose `&wt value2` was **already** incoherent with `temp0`. Whole batch halts, nothing written; `outputs.needs_human` carries the per-stage `old_temp0`/`old_value2`/`new_temp0`. | Re-run with `--couple` (set `value2` to the new `temp0`) or `--keep-value2` (edit `temp0` only). |
+| `FLAG_CONFLICT` | Both `--couple` and `--keep-value2` given. | Pass at most one. |
+| `FLAG_NOT_APPLICABLE` | `--couple`/`--keep-value2` used without `--param temp0`. | Those flags apply only to a `temp0` edit. |
 
 ## How it works
 
