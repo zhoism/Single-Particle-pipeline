@@ -32,6 +32,14 @@ import oracle as O  # noqa: E402
 GT = O.load_ground_truth()
 
 
+def _read_raw(p: Path) -> str:
+    """Read a file preserving exact bytes/newlines, 3.11-safe. The builtin
+    open(newline="") is the project convention here: Path.read_text(newline=)
+    is 3.13+ and crashes under OpenClaw's conda Python 3.11 (see tests/README)."""
+    with p.open(newline="") as fh:
+        return fh.read()
+
+
 def edit_expectation(stage, param, rendered):
     return O.edit_expectation(stage, param, rendered, GT)
 
@@ -79,7 +87,7 @@ def verify_one(wrapper: Path, selector, param, value, md) -> list[str]:
         rec = recs.get(fn, {})
         if rec.get("status") != estatus:
             probs.append(f"{fn} status exp {estatus} got {rec.get('status')}")
-        cur = (md / fn).read_text(newline="")
+        cur = _read_raw(md / fn)
         orig = GT.text[st]
         if estatus in ("error", "skipped", "unchanged"):
             if cur != orig:
@@ -102,14 +110,14 @@ def verify_ambiguous(wrapper: Path, base: Path) -> list[str]:
     d.mkdir(parents=True, exist_ok=True)
     f = d / "heat-1.in"
     f.write_text(" &cntrl\n  dt = 0.002,\n  dt = 0.002,\n /\n", newline="")
-    before = f.read_text(newline="")
+    before = _read_raw(f)
     env, p = run_sub(wrapper, d, "heat-1", "dt", "0.001")
     if env is None:
         return [f"ambiguous: no-json (rc={p.returncode})"]
     probs = []
     if env.get("ok") is not False or not any("AMBIGUOUS_PARAM" in e for e in env.get("errors", [])):
         probs.append(f"ambiguous: exp AMBIGUOUS_PARAM got ok={env.get('ok')} {env.get('errors')}")
-    if f.read_text(newline="") != before:
+    if _read_raw(f) != before:
         probs.append("ambiguous: file modified")
     return probs
 
@@ -152,7 +160,7 @@ def verify_restraint(wrapper: Path, base: Path, selector, op, wt, mask) -> list[
         rec = recs.get(fn, {})
         if rec.get("status") != estatus:
             probs.append(f"{fn} status exp {estatus} got {rec.get('status')}")
-        cur, orig = (d / fn).read_text(newline=""), GT.text[st]
+        cur, orig = _read_raw(d / fn), GT.text[st]
         if estatus in ("unchanged", "error", "skipped"):
             if cur != orig:
                 probs.append(f"{fn} touched on {estatus}")

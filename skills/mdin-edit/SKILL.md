@@ -72,7 +72,7 @@ Single JSON envelope on stdout; stderr is human-readable per-file progress.
       {"file": "heat-3.in", "status": "edited",
        "edits": [
          {"namelist": "cntrl", "param": "temp0",  "old": "300.0", "new": "310.0", "changed": true},
-         {"namelist": "wt",    "param": "value2", "old": "310.0", "new": "310.0", "changed": false}
+         {"namelist": "wt",    "param": "value2", "old": "300.0", "new": "310.0", "changed": true}
        ]},
       {"file": "press-3.in", "status": "edited",
        "edits": [{"namelist": "cntrl", "param": "temp0", "old": "300.0", "new": "310.0", "changed": true}]},
@@ -122,7 +122,7 @@ whole batch `ok:false` and **writes nothing** (all-or-nothing).
 - **Post-edit self-check.** The result is re-parsed with an independent parser and the new
   value asserted; a mismatch is a hard `SELF_CHECK_FAILED` and **nothing is written**.
 - **Advisory validation.** The vendored `check_amber` logic runs over the result for
-  transparency (e.g. confirming the heat-3 mismatch is gone). Its findings never gate `ok`;
+  transparency (e.g. confirming heat-3's `temp0`/`&wt value2` stay coherent after an edit). Its findings never gate `ok`;
   a FAIL on the exact value you deliberately set within bounds is downgraded to a WARN.
 
 ## Errors
@@ -244,9 +244,10 @@ The whole point of this skill is to *never make a silent mistake* (the
 2. **Idempotency** — re-run is byte-identical; re-run reports `unchanged`; trailing newline intact.
 3. **Out-of-bounds** — `dt = 0.01` rejected; file unchanged (no half-write).
 4. **Wrong-param** — `dt` on min1 rejected; `dt` still absent (no append).
-5. **Ext-A** — `temp0 → 310` `group:third-onward`: heat-3 `value2` coupled (value1 preserved),
-   relax/prod get no `&wt`, heat-1/2 + press-1 untouched, heat-3 mismatch WARN gone. **5b**
-   exercises the coupling rewrite (`temp0 → 305` → `value2 = 305.0`).
+5. **Ext-A** — `temp0 → 310` `group:third-onward`: heat-3 `value2` coupled to the new temp0
+   (value1/ramp-start preserved → heat-3 stays coherent, validator confirms), relax/prod get no
+   `&wt`, heat-1/2 + press-1 untouched. **5b** exercises the coupling rewrite (`temp0 → 305` →
+   `value2 = 305.0`); **5c** is the hermetic, demo-independent twin (synthetic coherent fixture).
 6. **Ext-B** — `cut → 7.0`: `ok:true` despite the validator's <8 Å FAIL, with a deliberate WARN.
 7. **Ext-C** — `restraint_wt 5.0 → 1.0` on press-1 (mask line intact); **7b** negative on relax
    (ntr=0) rejected; **7c** `group:all` skips the ntr=0 files and edits the rest.

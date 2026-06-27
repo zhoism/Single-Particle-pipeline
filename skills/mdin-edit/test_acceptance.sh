@@ -172,6 +172,42 @@ grep -qx '  temp0 = 305.0,' "$SC/heat-3.in" || fail "Ext-A 5b: temp0 not 305"
 grep -qx '  value1 = 200.0, value2 = 305.0,' "$SC/heat-3.in" || fail "Ext-A 5b: &wt value2 not coupled to 305 (value1 must stay 200)"
 pass "Ext-A 5b (coupling actually rewrites value2)"
 
+# ---- Case 5c: hermetic coherent-couple (demo-independent) -----------------
+# Owns its fixture (never reads the external demo): a synthetic heat stage that
+# starts COHERENT (temp0 == &wt value2 == 300). Editing temp0 → 305 must couple
+# value2 → 305 and keep value1 (the ramp START) at 200. This pins the heat-stage
+# coupling contract regardless of what the advisor demo happens to hold.
+echo "[case 5c] hermetic coherent-couple — synthetic heat stage, temp0 300→305 couples value2" >&2
+SC="$RUN_BASE/coherent_couple"; rm -rf "$SC" && mkdir -p "$SC"
+cat > "$SC/heat-1.in" <<'EOF'
+ &cntrl
+  imin = 0,
+  nstlim = 50000,
+  dt = 0.002,
+  cut = 9.0,
+  ntc = 2,
+  ntf = 2,
+  tempi = 200.0,
+  temp0 = 300.0,
+  nmropt = 1,
+ /
+ &wt
+  type = 'TEMP0',
+  istep1 = 0, istep2 = 40000,
+  value1 = 200.0, value2 = 300.0,
+ /
+ &wt
+  type = 'END',
+ /
+EOF
+python3 "$WRAPPER" --md-dir "$SC" --stage heat-1 --param temp0 --value 305 \
+  > "$SC/env.json" 2>/dev/null
+assert_ok "$SC/env.json" "hermetic coherent-couple"
+grep -qx '  temp0 = 305.0,' "$SC/heat-1.in" || fail "5c: temp0 not 305"
+grep -qx '  value1 = 200.0, value2 = 305.0,' "$SC/heat-1.in" \
+  || fail "5c: value2 not coupled to 305 (value1 must stay 200)"
+pass "5c hermetic coherent-couple (owns its fixture; value2 follows temp0)"
+
 # ---- Case 6: Ext-B — cut → 7.0 -------------------------------------------
 echo "[case 6] Ext-B — cut → 7.0 (accepted with deliberate WARN)" >&2
 SC="$(fresh extB)"

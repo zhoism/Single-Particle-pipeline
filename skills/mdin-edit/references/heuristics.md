@@ -23,7 +23,7 @@ It is **vendored, not imported**: an OpenClaw skill under `project-prime/` must 
 self-contained and cannot reach into the vault's `.claude/` tree (separate repo, may move).
 Re-sync and bump the provenance date if the upstream bounds change. The wrapper uses it for
 (a) the post-edit **self-check parse** (an independent parser confirming the rendered value
-landed) and (b) **advisory** post-edit validation (e.g. confirming the heat-3 mismatch is gone).
+landed) and (b) **advisory** post-edit validation (e.g. confirming heat-3's `temp0`/`&wt value2` stay coherent).
 
 ## Heuristics
 

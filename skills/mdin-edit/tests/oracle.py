@@ -336,10 +336,12 @@ def _verify_ground_truth(gt: GroundTruth) -> None:
         has_ns = "nstlim" in gt.present[st]
         if has_ns != (st in EXPECT_PRESENT_DT_TEMP0):
             errs.append(f"{st}: nstlim presence mismatch (present={has_ns})")
-    # the famous heat-3 mismatch must still be there
+    # heat-3 must stay COHERENT (temp0 == &wt value2); the advisor's original
+    # value2=310 was a typo, fixed 2026-06-26 (vault 51e15c1). This canary now
+    # guards the demo from *regressing* back to the old 300/310 mismatch.
     h3 = IndependentScanner(gt.text["heat-3"])
-    if _as_decimal(h3.cntrl().get("temp0", "")) == _as_decimal((h3.wt_temp0() or {}).get("value2", "")):
-        errs.append("heat-3 temp0/&wt value2 are already equal (demo changed?)")
+    if _as_decimal(h3.cntrl().get("temp0", "")) != _as_decimal((h3.wt_temp0() or {}).get("value2", "")):
+        errs.append("heat-3 temp0/&wt value2 disagree (demo regressed to the old mismatch?)")
     if errs:
         raise OracleError("GROUND-TRUTH DRIFT:\n  " + "\n  ".join(errs))
 
