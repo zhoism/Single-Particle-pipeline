@@ -99,6 +99,14 @@ A **substantive code result** (a skill/wrapper change, a verified bug-fix, a new
 
 Both repos are private + solo, so push is low-stakes and reversible; the gate catches drift, it doesn't gatekeep. A user-scope `Stop`-hook backstop (in `~/.claude`) nudges once if a session ends with uncommitted or unpushed work here. *Don't push a feature branch's commits until each has been reviewed.*
 
+## Concurrent sessions & the working tree
+
+Default (solo): work on `main` directly — edit, commit, push.
+
+If a second session may touch this repo at the same time, isolate: each works in its own `git worktree` on its own branch (`git worktree add ../project-prime-<tag> -b <tag>`), merging to `main` when done. In a **shared** checkout, never `git add -A` or `git restore` / `reset --hard` while another session may hold uncommitted work (it permanently deletes it) — stage explicit files. If the tree changes in ways *this* session didn't cause (new files, a commit you didn't make), assume a concurrent session and stop sweeping before committing.
+
+Caveat: a worktree isolates *editing*, but a parallel pipeline **run** from one can still load skills from the canonical checkout (the OpenClaw gateway / `extraDirs` point there) — keep one session as the runner for concurrent execution.
+
 ## Companion vault — when to use which
 
 For *design* questions, check the vault first: `../Single Particle/` (GitHub `zhoism/Single-Particle`). Landmark notes:
