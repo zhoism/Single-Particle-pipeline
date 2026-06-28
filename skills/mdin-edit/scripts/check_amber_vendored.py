@@ -7,6 +7,8 @@ Vendored verbatim (parser + bounds + heat-3 rule + foreign-path detector) on
 2026-06-08 from the Claude Code validator skill:
     .claude/skills/md-param-check/checks/check_amber.py
 (in the vault repo `Single-Particle`, branch `main`).
+Re-synced 2026-06-27 to add the irest/ntx restart-coherence gate (validator code
+remains byte-equal to canonical; only this PROVENANCE header diverges).
 
 WHY A COPY, NOT AN IMPORT: this is an OpenClaw skill under `project-prime/`; it
 must be self-contained and cannot reach into the vault's `.claude/` tree (which is
@@ -173,6 +175,33 @@ def check_amber_in(path: Path) -> FileReport:
         elif ntc == 1 and ntf == 1 and (dt or 0) >= 0.002 - 1e-9:
             rep.findings.append(Finding("FAIL", "dt too large without SHAKE",
                 f"ntc=1 ntf=1 (no SHAKE) with dt={dt}; need SHAKE or smaller dt"))
+
+    # --- Restart coherence: irest needs velocities, ntx must read them ---
+    # irest=1 (continue the step counter) requires inherited velocities, so it is
+    # only legal with a velocity-reading ntx (4/5/6/7; 5 is the modern standard).
+    # irest=1, ntx=1 reads coordinates only -> pmemd aborts ("ntx and irest are
+    # inconsistent!"). The reverse (ntx=5, irest=0) is legal and must NOT fire.
+    # AMBER defaults (imin=0, irest=0, ntx=1) are applied, so an OMITTED ntx under
+    # irest=1 is still caught.
+    #
+    # Parse imin/irest/ntx from a COMMENT-STRIPPED re-parse, NOT the shared `c`
+    # dict: parse_namelists() strips '!' comments only AFTER its &.../ block regex,
+    # so a '/' inside a comment truncates the block and hides later fields. Because
+    # this gate applies defaults, that truncation would silently flip its verdict
+    # ('/' before ntx -> ntx defaults to 1 -> false FAIL on a legal restart; '/'
+    # before irest -> false PASS on an illegal one). Re-parsing scrubbed text makes
+    # the gate robust. (The same truncation hazard affects other checks that read
+    # late fields, e.g. temp0/&wt — tracked as a parser follow-up in Gap_Gate_Coverage.)
+    rcntrl = parse_namelists(re.sub(r"!.*", "", content)).get("cntrl", [{}])[0]
+
+    def _ic(key: str, default: float) -> float:
+        v = num(rcntrl.get(key))
+        return default if v is None else v
+
+    if _ic("imin", 0) == 0 and _ic("irest", 0) == 1 and _ic("ntx", 1) not in (4, 5, 6, 7):
+        rep.findings.append(Finding("FAIL", "irest/ntx incoherent",
+            f"irest=1 (restart) needs velocities but ntx={int(_ic('ntx', 1))} reads "
+            f"coordinates only; a restart requires ntx in {{4,5,6,7}} (5 standard)"))
 
     # --- cut ---
     if cut is not None:
