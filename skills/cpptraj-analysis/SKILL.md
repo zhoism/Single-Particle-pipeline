@@ -4,7 +4,7 @@ description: "Run the full post-MD analysis suite on an AMBER production traject
 license: MIT
 homepage: https://github.com/zhoism/Single-Particle
 compatibility: Requires AmberTools (cpptraj, MMPBSA.py) on PATH + Python with numpy/matplotlib. Inputs come from tleap-build (topologies) and amber-md-run (trajectory + mdout).
-metadata: {"openclaw":{"requires":{},"os":["darwin"]},"requires":{"bins":["cpptraj"]},"inputs":{"comp-oct-top":"solvated topology","comp-dry-top":"dry complex topology","traj":"production .nc","protein-top":"MM-GBSA receptor (optional)","ligand-top":"MM-GBSA ligand (optional)","mdout-dir":"dir with heat/density/product .out (thermo)","analyses":"comma list or all","output_dir":"path (default ./analysis)"},"outputs":{"analyses":"{name:{dat,png,ok}}","mmgbsa_dG_kcal_mol":"binding free energy"},"validation":["core_rmsd_rmsf_rg_produced","each_requested_emits_png","mmgbsa_dG_parsed"],"dry_run":true,"source":"project-prime/skills/cpptraj-analysis","stage":"Phase3.Stage5"}
+metadata: {"openclaw":{"requires":{},"os":["darwin"]},"requires":{"bins":["cpptraj","MMPBSA.py","parmed"]},"inputs":{"comp-oct-top":"solvated topology","comp-dry-top":"dry complex topology","traj":"production .nc","protein-top":"MM-GBSA receptor (optional)","ligand-top":"MM-GBSA ligand (optional)","mdout-dir":"dir with heat/density/product .out (thermo)","analyses":"comma list or all","output_dir":"path (default ./analysis)"},"outputs":{"analyses":"{name:{dat,png,ok}}","mmgbsa_dG_kcal_mol":"binding free energy"},"validation":["core_rmsd_rmsf_rg_produced","each_requested_emits_png","mmgbsa_dG_parsed","gb_radii_consistent_with_igb_fatal"],"dry_run":true,"source":"project-prime/skills/cpptraj-analysis","stage":"Phase3.Stage5"}
 ---
 
 # cpptraj-analysis

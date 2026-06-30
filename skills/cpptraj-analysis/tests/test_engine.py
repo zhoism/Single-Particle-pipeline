@@ -408,10 +408,58 @@ def test_gb_radii_check():
     check("unknown igb -> no finding", "finding" not in r5, str(r5))
 
 
+# ---- TARGET_RADIUS_SET + parmed_radii_script + suite_ok (mbondi2 fix) -----
+
+def test_target_radius_set():
+    # The build target must be DERIVED from the igb map, not hardcoded — so the
+    # radii we build with always equal the radii the check requires.
+    check("MMGBSA_IGB is 5", W.MMGBSA_IGB == 5, str(W.MMGBSA_IGB))
+    check("TARGET_RADIUS_SET derived from IGB_RADIUS_SET[MMGBSA_IGB]",
+          W.TARGET_RADIUS_SET == W.IGB_RADIUS_SET[W.MMGBSA_IGB],
+          str(W.TARGET_RADIUS_SET))
+    check("TARGET_RADIUS_SET == mbondi2",
+          W.TARGET_RADIUS_SET == "mbondi2", str(W.TARGET_RADIUS_SET))
+
+
+def test_parmed_radii_script():
+    s = W.parmed_radii_script("../comp_dry_mbondi2.top")
+    lines = s.splitlines()
+    check("parmed setOverwrite line", lines[0] == "setOverwrite True", repr(s))
+    check("parmed changeRadii line", lines[1] == "changeRadii mbondi2", repr(s))
+    check("parmed outparm line",
+          lines[2] == "outparm ../comp_dry_mbondi2.top", repr(s))
+    check("parmed quit line", lines[3] == "quit", repr(s))
+    # Honors an explicit target (defaults to TARGET_RADIUS_SET otherwise).
+    s2 = W.parmed_radii_script("../x.top", target="mbondi3")
+    check("parmed honors explicit target",
+          "changeRadii mbondi3\n" in s2, repr(s2))
+
+
+def test_suite_ok():
+    # No MM-GBSA in the run -> gb_radii None -> verdict is just core_ok.
+    check("suite_ok None gb + core True", W.suite_ok(True, None) is True, "")
+    check("suite_ok None gb + core False", W.suite_ok(False, None) is False, "")
+    # Fixed build -> consistent True -> core passes through.
+    good = W.gb_radii_check("mbondi2", 5)
+    check("suite_ok consistent fix passes core",
+          W.suite_ok(True, good) is True, str(good))
+    # SURVIVING mismatch -> FATAL even when every core analysis produced.
+    bad = W.gb_radii_check("mbondi", 5)
+    check("suite_ok read mismatch -> False even if core True",
+          W.suite_ok(True, bad) is False, str(bad))
+    # Unverifiable radii (None) is not a spurious red -> core passes through.
+    none = W.gb_radii_check(None, 5)
+    check("suite_ok unverifiable radii passes core through",
+          W.suite_ok(True, none) is True, str(none))
+
+
 def main() -> int:
     tests = (
         test_prmtop_radius_set,
         test_gb_radii_check,
+        test_target_radius_set,
+        test_parmed_radii_script,
+        test_suite_ok,
         test_load_xy_empty_file,
         test_load_xy_missing_file,
         test_load_xy_comment_blank_only,

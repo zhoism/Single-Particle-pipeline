@@ -53,6 +53,12 @@ MMGBSA_IGB = 5
 IGB_RADIUS_SET = {1: "mbondi", 2: "mbondi2", 5: "mbondi2", 7: "bondi",
                   8: "mbondi3"}
 
+# a_mmgbsa retypes the dry MM-GBSA component topologies to the radii the run's igb
+# REQUIRES, derived from the same map the check reads — so "what we build with" can
+# never drift from "what the check requires", and the fatal gate below cannot fire
+# on our own fixed builds.
+TARGET_RADIUS_SET = IGB_RADIUS_SET[MMGBSA_IGB]   # igb=5 -> "mbondi2"
+
 
 def prmtop_radius_set(top_path: Path) -> str | None:
     """The PBRadii set token from a prmtop's %FLAG RADIUS_SET value line, e.g.
@@ -74,25 +80,35 @@ def prmtop_radius_set(top_path: Path) -> str | None:
 
 
 def gb_radii_check(radius_set: str | None, igb: int) -> dict[str, Any]:
-    """NON-FATAL consistency record between a prmtop's RADIUS_SET and the GB igb.
+    """Consistency record between a prmtop's RADIUS_SET and the GB igb.
     Returns {igb, radius_set, required, consistent[, finding]}. `consistent` is
     None when the radius set could not be read (never a spurious mismatch).
 
-    Decision 2026-06-27: this stays a non-fatal FINDING — the fatal gate and the
-    mbondi2 fix both shift the reported MM-GBSA dG and need a re-baseline, so the
-    fix is deferred (see handoffs/Next_Session_Prompt_GB_Radii_Fix.md). To flip
-    it fatal once the fix lands, append out['finding'] to validate()'s errors."""
+    a_mmgbsa retypes the dry topologies to the required set (TARGET_RADIUS_SET)
+    before MM-GBSA, so on a fixed build this reports consistent. A SURVIVING
+    mismatch is FATAL — it means the fix was missing or did not take; the suite
+    verdict (suite_ok) reds the run rather than report a dG under wrong radii."""
     required = IGB_RADIUS_SET.get(igb)
     consistent = (radius_set == required) if radius_set is not None else None
     out: dict[str, Any] = {"igb": igb, "radius_set": radius_set,
                            "required": required, "consistent": consistent}
     if radius_set is not None and required is not None and radius_set != required:
         out["finding"] = (
-            f"GB_RADII_IGB_MISMATCH: prmtop RADIUS_SET '{radius_set}' but igb="
-            f"{igb} expects '{required}' (Amber Table 4.1); the GB solvation term "
-            "is computed under mismatched radii. NON-FATAL — deferred fix + dG "
-            "re-baseline tracked in Next_Session_Prompt_GB_Radii_Fix.")
+            f"GB_RADII_IGB_MISMATCH: prmtop RADIUS_SET '{radius_set}' but igb={igb} "
+            f"expects '{required}' (Amber Table 4.1). a_mmgbsa retypes the dry tops "
+            "to the required set before MM-GBSA; a surviving mismatch = the fix was "
+            "missing or did not take — FATAL.")
     return out
+
+
+def parmed_radii_script(out_top_rel: str, target: str = TARGET_RADIUS_SET) -> str:
+    """ParmEd action script (fed via `parmed -p <in> -i <script>`): retype the GB
+    radii to `target` and write ONLY a new prmtop. `changeRadii` rewrites both the
+    RADII array AND the %FLAG RADIUS_SET descriptor (the token prmtop_radius_set
+    reads). `setOverwrite True` guards a re-run into a non-empty output dir.
+    out_top_rel is relative (../name) so a space in the project path can't
+    tokenize the line."""
+    return f"setOverwrite True\nchangeRadii {target}\noutparm {out_top_rel}\nquit\n"
 
 
 # ---- Envelope ------------------------------------------------------------
@@ -109,6 +125,18 @@ def emit_and_exit(*, ok, dry_run, outputs=None, validation=None, errors=None,
                   code=0) -> None:
     print(envelope(ok, dry_run, outputs, validation, errors))
     sys.exit(code)
+
+
+def suite_ok(core_ok: bool, gb_radii: dict[str, Any] | None) -> bool:
+    """Final suite verdict. Core analyses must be produced AND, when MM-GBSA ran,
+    the GB radii must be consistent with igb (Amber Table 4.1). A read mismatch
+    (consistent is False) is FATAL — the mbondi2 fix was missing or did not take;
+    MM-GBSA is not a core analysis, so without this a StepFailure would leave the
+    suite ok:true. consistent None/absent (no MM-GBSA, or radii unverifiable)
+    never fails core by itself."""
+    if gb_radii is not None and gb_radii.get("consistent") is False:
+        return False
+    return core_ok
 
 
 def resolve_bin(name: str) -> str | None:
@@ -553,7 +581,7 @@ def a_thermo(ctx):
 
 
 def a_mmgbsa(ctx):
-    d = ctx["adir"]("mmgbsa"); m = ctx["masks"]
+    d = ctx["adir"]("mmgbsa")
     if not (ctx.get("protein_top") and ctx.get("ligand_top")):
         ctx["result"]("mmgbsa", None, None, False,
                       note="protein-only system: no binding free energy")
@@ -562,6 +590,63 @@ def a_mmgbsa(ctx):
     if not mmpbsa:
         ctx["result"]("mmgbsa", None, None, False, note="MMPBSA.py not found")
         return
+    out_dir = ctx["out_dir"]
+
+    # --- GB-radii fix (Amber Table 4.1) -----------------------------------
+    # tleap builds the dry component tops (-cp/-rp/-lp) with default mbondi, but
+    # igb=MMGBSA_IGB is parameterized for TARGET_RADIUS_SET. Retype ONLY the radius
+    # set on each dry top with parmed (changeRadii rewrites the RADII array AND the
+    # RADIUS_SET descriptor). comp_oct (-sp) is solvent-strip-only — its radii never
+    # enter the GB term — so it is left untouched. parmed runs in the mmgbsa subdir
+    # and refs the out_dir tops as ../name (relative => space-safe), with stdout
+    # redirected to a log so its splash text can't corrupt the JSON envelope.
+    parmed = resolve_bin("parmed")
+    fixed: dict[str, str] = {}
+    fix_error: str | None = None
+    if parmed is None:
+        fix_error = (f"GB_RADII_FIX_FAILED: parmed not found — cannot retype GB "
+                     f"radii to {TARGET_RADIUS_SET} (igb={MMGBSA_IGB}, "
+                     "Amber Table 4.1)")
+    else:
+        for key, src in (("comp_dry", "comp_dry.top"), ("protein", "protein.top"),
+                         ("ligand", "ligand.top")):
+            out_name = f"{key}_{TARGET_RADIUS_SET}.top"
+            sp = d / f"parmed_{key}.in"
+            sp.write_text(parmed_radii_script(f"../{out_name}"))
+            with (d / f"parmed_{key}.log").open("w") as lf:
+                proc = subprocess.run([parmed, "-p", f"../{src}", "-i", sp.name],
+                                      cwd=str(d), stdout=lf,
+                                      stderr=subprocess.STDOUT)
+            top = out_dir / out_name
+            if proc.returncode != 0 or not top.is_file():
+                fix_error = (f"GB_RADII_FIX_FAILED: parmed produced no {out_name} "
+                             f"(rc={proc.returncode}; see parmed_{key}.log)")
+                break
+            if prmtop_radius_set(top) != TARGET_RADIUS_SET:
+                fix_error = (f"GB_RADII_FIX_FAILED: {out_name} RADIUS_SET reads "
+                             f"'{prmtop_radius_set(top)}', want '{TARGET_RADIUS_SET}'")
+                break
+            fixed[key] = f"../{out_name}"
+
+    # Record consistency for the fatal gate in main(): check the FIXED comp_dry on
+    # success (-> consistent True by construction), else the UNFIXED comp_dry so a
+    # real mismatch persists into ctx and reds the suite (see suite_ok).
+    check_top = (out_dir / f"comp_dry_{TARGET_RADIUS_SET}.top"
+                 if fix_error is None else out_dir / "comp_dry.top")
+    gb_radii = gb_radii_check(prmtop_radius_set(check_top), MMGBSA_IGB)
+    ctx["gb_radii"] = gb_radii
+    if fix_error is not None:
+        # Fix attempted and FAILED -> the radii are NOT verified mbondi2. Force a
+        # mismatch record so the suite reds (suite_ok + the emit FATAL append) even
+        # if the unfixed top has no readable RADIUS_SET (consistent would otherwise
+        # be None and slip the gate). The StepFailure is caught in main(), which
+        # records mmgbsa failed; refuse to compute a dG under mismatched radii.
+        gb_radii["consistent"] = False
+        gb_radii.setdefault("finding", fix_error)
+        raise StepFailure(fix_error)
+    if gb_radii.get("finding"):
+        print(f"[mmgbsa] {gb_radii['finding']}", file=sys.stderr)
+
     nframes = ctx.get("nframes", 0)
     end = max(nframes, 1)
     intval = 1 if nframes <= 100 else max(1, nframes // 100)
@@ -574,18 +659,9 @@ def a_mmgbsa(ctx):
         f"  igb={MMGBSA_IGB}, saltcon=0.100,\n"
         "/\n")
     (d / "mmgbsa.in").write_text(mmin)
-    # Non-fatal GB-radii <-> igb consistency detector (the tripwire). The MM-GBSA
-    # topologies are built with default mbondi radii but igb=5 expects mbondi2
-    # (Amber Table 4.1) -> mismatch on every run today; surfaced here without
-    # reddening the run (fix + dG re-baseline deferred — see gb_radii_check).
-    gb_radii = gb_radii_check(prmtop_radius_set(ctx["out_dir"] / "comp_dry.top"),
-                              MMGBSA_IGB)
-    ctx["gb_radii"] = gb_radii
-    if gb_radii.get("finding"):
-        print(f"[mmgbsa] {gb_radii['finding']}", file=sys.stderr)
     cmd = [mmpbsa, "-O", "-i", "mmgbsa.in", "-o", "mmgbsa.dat",
-           "-sp", ctx["comp_oct_top"], "-cp", ctx["comp_dry_top"],
-           "-rp", ctx["protein_top"], "-lp", ctx["ligand_top"],
+           "-sp", ctx["comp_oct_top"], "-cp", fixed["comp_dry"],
+           "-rp", fixed["protein"], "-lp", fixed["ligand"],
            "-y", ctx["traj"]]
     log = d / "mmgbsa.log"
     with log.open("w") as lf:
@@ -600,8 +676,7 @@ def a_mmgbsa(ctx):
         ax.set_title(f"MM-GBSA ΔG = {dG:.2f} kcal/mol")
         fig.tight_layout(); fig.savefig(d/"mmgbsa.png", dpi=150); plt.close(fig)
     note = f"dG={dG:.2f} kcal/mol" if ok else "parse failed"
-    if gb_radii.get("finding"):
-        note += "; " + gb_radii["finding"]
+    note += f"; GB radii {TARGET_RADIUS_SET} (igb={MMGBSA_IGB})"
     ctx["result"]("mmgbsa", d/"mmgbsa.dat", d/"mmgbsa.png", ok, note=note)
     if ok:
         ctx["mmgbsa_dG"] = dG
@@ -768,14 +843,20 @@ def main() -> None:
         outputs["mmgbsa_dG_kcal_mol"] = ctx["mmgbsa_dG"]
 
     # Suite is ok if every REQUESTED core analysis produced output; individual
-    # optional failures / not-applicable skips are reported but not fatal.
+    # optional failures / not-applicable skips are reported but not fatal. A
+    # SURVIVING GB-radii mismatch is the exception — it is fatal (suite_ok): the
+    # mbondi2 fix was missing or did not take, so MM-GBSA ran (or would run) under
+    # mismatched radii. MM-GBSA is not core, so StepFailure alone wouldn't red it.
     core = {"rmsd", "rmsf", "rg"} & set(requested)
     core_ok = core.issubset(set(produced))
-    emit_and_exit(ok=core_ok, dry_run=False, outputs=outputs,
+    gbr = ctx.get("gb_radii")
+    final_ok = suite_ok(core_ok, gbr)
+    if gbr is not None and gbr.get("consistent") is False and gbr.get("finding"):
+        errors.append("FATAL " + gbr["finding"])
+    emit_and_exit(ok=final_ok, dry_run=False, outputs=outputs,
                   validation={"produced": produced, "failed": failed,
-                              "nframes": nframes,
-                              "gb_radii": ctx.get("gb_radii")},
-                  errors=errors, code=0 if core_ok else 3)
+                              "nframes": nframes, "gb_radii": gbr},
+                  errors=errors, code=0 if final_ok else 3)
 
 
 if __name__ == "__main__":
