@@ -363,11 +363,24 @@ def _prmtop_radius(radius_line: str) -> str:
 
 
 def test_prmtop_radius_set():
-    # Each of the four sets -> its parenthetical token (hand-derived).
+    # Each of the four sets -> its parenthetical token (hand-derived). mbondi3's
+    # line has "Bondi2" UNparenthesized, so the last-paren rule returns 'mbondi3'
+    # (not 'bondi2') — the case the corrected wrapper comment describes.
     for token, line in RADIUS_SET_LINES.items():
         top = _write(f"rad_{token}.prmtop", _prmtop_radius(line))
         check(f"radius_set parses ({token})",
               W.prmtop_radius_set(top) == token, repr(W.prmtop_radius_set(top)))
+    # Real-format layout pin: a committed excerpt from an ACTUAL parmed-retyped
+    # mbondi2 prmtop (genuine 1a80 trailing padding + real %FLAG boundaries), so a
+    # future prmtop-layout drift can't silently make the regex return None and stop
+    # the GB-radii detector firing. Committed as .txt (not a gitignored *.top).
+    real_fx = HERE / "fixtures" / "radius_set_mbondi2_real.txt"
+    if real_fx.is_file():
+        check("radius_set parses a REAL mbondi2 prmtop excerpt",
+              W.prmtop_radius_set(real_fx) == "mbondi2",
+              repr(W.prmtop_radius_set(real_fx)))
+    else:
+        print("  SKIP radius_set real fixture (missing)")
     # No RADIUS_SET flag -> None.
     noflag = _write("rad_noflag.prmtop",
                     "%FLAG POINTERS\n%FORMAT(10I8)\n   1 2 3\n")

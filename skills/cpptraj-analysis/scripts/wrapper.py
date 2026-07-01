@@ -72,9 +72,11 @@ def prmtop_radius_set(top_path: Path) -> str | None:
     m = re.search(r"%FLAG RADIUS_SET\s*\n%FORMAT\([^)]*\)\s*\n([^\n]*)", text)
     if not m:
         return None
-    # The set token is the LAST parenthetical on the line — mbondi2/mbondi3 carry
-    # an earlier "(N)" / "(Bondi2)" aside (e.g. "H(N)-modified Bondi radii
-    # (mbondi2)"), so a first-match grab would wrongly return 'n'.
+    # The set token is the LAST parenthetical on the line. Only mbondi2 carries an
+    # earlier parenthetical aside — "H(N)-modified Bondi radii (mbondi2)" — where a
+    # first-match grab would wrongly return 'n'. (mbondi3's line, "ArgH and AspGluO
+    # modified Bondi2 radii (mbondi3)", has Bondi2 UNparenthesized, so it is a
+    # single-paren case; the last-paren rule handles both.)
     toks = re.findall(r"\(([A-Za-z0-9]+)\)", m.group(1))
     return toks[-1].lower() if toks else None
 
