@@ -1,0 +1,16 @@
+%VERSION  VERSION_STAMP = V0001.000  DATE = 06/30/26
+%FLAG POINTERS
+%FORMAT(10I8)
+       4       1       1       1       0       0       0       0       0       0
+%FLAG BONDS_INC_HYDROGEN
+%FORMAT(10I8)
+       0       3       1
+%FLAG BONDS_WITHOUT_HYDROGEN
+%FORMAT(10I8)
+       6       9       1
+%FLAG RESIDUE_LABEL
+%FORMAT(20a4)
+ALA 
+%FLAG MASS
+%FORMAT(5E16.8)
+  1.00800000

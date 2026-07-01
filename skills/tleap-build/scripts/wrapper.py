@@ -26,6 +26,7 @@ Correctness rules baked in (from Research_amber_md_skill.md steal-list):
 """
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -217,6 +218,116 @@ SOLVENT_FLOOR = 100
 MAX_BOND_ANGSTROM = 3.0
 
 
+def prmtop_bonds(top_path: Path) -> list[tuple[int, int]] | None:
+    """Every bonded atom-index pair (0-based) in an AMBER prmtop, read from the
+    BONDS_INC_HYDROGEN + BONDS_WITHOUT_HYDROGEN blocks. AMBER stores each bond as
+    a triple (3*ai, 3*aj, bond_type_idx) where 3*a is the 0-based coordinate
+    offset, so the atom index is offset // 3.
+
+    BOTH blocks are MANDATORY sections of a well-formed prmtop; the heavy-atom
+    cross-gap bond this gate hunts lives ONLY in BONDS_WITHOUT_HYDROGEN. So a
+    missing/unparseable block or a total absence of bonds returns None
+    ('could-not-verify' -> caller falls back to the log-scrape) rather than a
+    partial/empty list that would read as a CLEAN topology (a fail-OPEN miss).
+    None on any parse failure."""
+    try:
+        text = top_path.read_text()
+    except (OSError, UnicodeError):
+        return None
+    pairs: list[tuple[int, int]] = []
+    for flag in ("BONDS_INC_HYDROGEN", "BONDS_WITHOUT_HYDROGEN"):
+        # Tolerate optional %COMMENT lines between %FLAG and %FORMAT (permitted by
+        # the AMBER format — real ff19SB prmtops carry them in CMAP sections).
+        m = re.search(
+            rf"%FLAG {flag}\s*\n(?:%COMMENT[^\n]*\n)*%FORMAT\([^)]*\)\s*\n"
+            r"(.*?)(?=\n%FLAG|\Z)", text, re.S)
+        if not m:
+            return None  # a mandatory BONDS block is missing -> cannot verify
+        try:
+            vals = [int(t) for t in m.group(1).split()]
+        except ValueError:
+            return None
+        # 10I8 triples: (3*ai, 3*aj, type_idx). Coordinate offsets stay well below
+        # I8's 8-column width for any real system (3*NATOM), so .split() — the
+        # idiom the other prmtop helpers use — never mis-merges adjacent fields.
+        for i in range(0, len(vals) - 2, 3):
+            pairs.append((vals[i] // 3, vals[i + 1] // 3))
+    if not pairs:
+        return None  # a real molecule always has bonds; zero == parse failure
+    return pairs
+
+
+def read_amber_coords(crd_path: Path, natom: int
+                      ) -> list[tuple[float, float, float]] | None:
+    """The first NATOM xyz triples from an AMBER ASCII restart/coord file
+    (comp_dry.crd): line 1 title, line 2 'NATOM [time]', then 3*NATOM floats in
+    %FORMAT(6F12.7). Parsed by fixed 12-char columns (NOT split) so two adjacent
+    full-width negative coordinates can never merge into one bad token. None on
+    any parse failure."""
+    try:
+        lines = crd_path.read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    if len(lines) < 2:
+        return None
+    # Cross-check the crd's own NATOM header (line 2) against the prmtop's NATOM:
+    # a stale/mismatched comp_dry.crd left in run_dir must NOT be read as "the
+    # first natom triples" of the wrong geometry (the in-range index guard in
+    # structural_long_bonds cannot catch a same-or-larger mismatched file).
+    try:
+        if int(lines[1].split()[0]) != natom:
+            return None
+    except (ValueError, IndexError):
+        return None
+    need = 3 * natom
+    nums: list[float] = []
+    for ln in lines[2:]:  # skip title + NATOM header
+        for i in range(0, len(ln), 12):
+            field = ln[i:i + 12].strip()
+            if not field:
+                continue
+            try:
+                nums.append(float(field))
+            except ValueError:
+                return None
+            if len(nums) >= need:
+                break
+        if len(nums) >= need:
+            break
+    if len(nums) < need:
+        return None
+    return [(nums[i], nums[i + 1], nums[i + 2]) for i in range(0, need, 3)]
+
+
+def structural_long_bonds(top_path: Path, crd_path: Path) -> list[float] | None:
+    """Lengths (A) of every bond longer than MAX_BOND_ANGSTROM, computed
+    STRUCTURALLY from the prmtop BONDS blocks + the matching coordinates. A
+    spurious cross-gap bond is physically present in the BUILT topology, so this
+    fires even if teLeap rewords or drops its `check` log warning — the fail-OPEN
+    weakness of the log-scrape (same class as the vacuous SYSTEM_NOT_NEUTRAL
+    scrape). Returns None on any parse failure (caller treats None as 'could not
+    verify structurally' and falls back to the log-scrape signal)."""
+    natom = prmtop_natom(top_path)
+    if natom is None:
+        return None
+    bonds = prmtop_bonds(top_path)
+    if bonds is None:
+        return None
+    coords = read_amber_coords(crd_path, natom)
+    if coords is None:
+        return None
+    long_bonds: list[float] = []
+    for ai, aj in bonds:
+        if not (0 <= ai < natom and 0 <= aj < natom):
+            return None  # index out of range -> prmtop/crd mismatch; don't trust
+        ax, ay, az = coords[ai]
+        bx, by, bz = coords[aj]
+        d = math.sqrt((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2)
+        if d > MAX_BOND_ANGSTROM:
+            long_bonds.append(d)
+    return long_bonds
+
+
 # ---- leap.in generation --------------------------------------------------
 
 def build_leap_in(*, protein_pdb: str, ligand_mol2: str | None,
@@ -288,7 +399,7 @@ def parse_leap_log(log_path: Path) -> tuple[list[str], dict[str, Any]]:
         # validate() (CROSS_GAP_SPURIOUS_BOND). The "bond of" anchor is distinct
         # from "Close contact of N angstroms" (a clash warning, not a bond), so
         # that benign close-contact line is never captured.
-        mb = re.search(r"bond of\s+([0-9]+(?:\.[0-9]+)?)\s+angstrom", s,
+        mb = re.search(r"\bbond of\s+([0-9]+(?:\.[0-9]+)?)\s+angstrom", s,
                        re.IGNORECASE)
         if mb:
             info.setdefault("bond_lengths_angstrom", []).append(float(mb.group(1)))
@@ -396,19 +507,37 @@ def validate(run_dir: Path, has_ligand: bool,
                 f"(expected >= {SOLVENT_FLOOR}); solvateoct added ~none, so "
                 "explicit-solvent MD would run in vacuum")
 
-    # Spurious cross-gap bond (CROSS_GAP_SPURIOUS_BOND). parse_leap_log captured
-    # any "bond of N angstroms" warning from `check`; a length beyond
-    # MAX_BOND_ANGSTROM means tleap bonded across an un-TER'd residue gap / chain
-    # break. (A log-scrape by necessity — tleap's own warning is the only signal;
-    # bounded conservatively so a legit ~2 A bond never trips it.)
-    bond_lengths = log_info.get("bond_lengths_angstrom", [])
-    long_bonds = [round(b, 3) for b in bond_lengths if b > MAX_BOND_ANGSTROM]
-    if long_bonds:
+    # Spurious cross-gap bond (CROSS_GAP_SPURIOUS_BOND) — fail-CLOSED via TWO signals:
+    #  (1) STRUCTURAL (primary): bond lengths computed from comp_dry's BONDS blocks
+    #      + .crd coords. A cross-gap bond is physically in the built topology, so
+    #      this fires even if teLeap rewords or drops its `check` warning — closing
+    #      the log-scrape's fail-OPEN weakness (same class as the vacuous
+    #      SYSTEM_NOT_NEUTRAL scrape; "structural > log-scrape").
+    #  (2) LOG-SCRAPE (backstop): the "bond of N angstroms" warning parse_leap_log
+    #      captured — the fallback for when the structural parse can't run.
+    # The gate trips if EITHER reports a bond > MAX_BOND_ANGSTROM; conservative
+    # bound so a legit ~2 A (disulfide/covalent) bond never trips it.
+    log_long = [round(b, 3) for b in log_info.get("bond_lengths_angstrom", [])
+                if b > MAX_BOND_ANGSTROM]
+    struct = structural_long_bonds(run_dir / "comp_dry.top", run_dir / "comp_dry.crd")
+    struct_long = sorted(round(b, 3) for b in struct) if struct is not None else []
+    # Record structurally-found bonds (None = could-not-verify, fell back to log).
+    validation["structural_long_bonds"] = struct_long if struct is not None else None
+    if struct_long or log_long:
+        # Gate fires on EITHER signal (fail-closed). Report the structural list
+        # when present — it is the authoritative, multiplicity-preserving geometry
+        # (the log-scrape is a rounded backstop; a set-union of the two would
+        # both under-count identical-length bonds and double-list one bond at two
+        # roundings). Fall back to the log lengths only when structural could not
+        # verify (struct_long empty).
+        reported = struct_long if struct_long else log_long
+        src = ("structural+log" if struct_long and log_long
+               else "structural" if struct_long else "log")
         errors.append(
-            f"CROSS_GAP_SPURIOUS_BOND: tleap formed bond(s) of {long_bonds} A "
+            f"CROSS_GAP_SPURIOUS_BOND: tleap formed bond(s) of {reported} A "
             f"(> {MAX_BOND_ANGSTROM} A) — a residue gap / chain break without a "
-            "TER card was bonded across; add TER cards or model the missing "
-            "residues")
+            f"TER card was bonded across; add TER cards or model the missing "
+            f"residues [detected via {src}]")
 
     return validation, errors
 

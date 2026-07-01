@@ -474,6 +474,184 @@ def test_validate_cross_gap(tmp: Path):
     check("normal bonds -> no CROSS_GAP", errors2 == [], repr(errors2))
 
 
+# ---- (8) structural CROSS_GAP: prmtop_bonds / read_amber_coords /
+#          structural_long_bonds + the fail-CLOSED validate() wiring ----------
+#
+# The committed real-format fixtures pin the parse+distance path against AMBER's
+# actual prmtop/restart layout (the "structural > log-scrape" durability lesson —
+# a hand-built fixture the parser agrees with but real AMBER output disagrees with
+# is exactly the SYSTEM_NOT_NEUTRAL failure). structural_cross_gap_prmtop.txt is a
+# minimal NATOM=4 topology with a normal C-H bond (0-1) in BONDS_INC_HYDROGEN and a
+# heavy-heavy cross-gap bond (2-3) in BONDS_WITHOUT_HYDROGEN; the .crd places 0-1 at
+# 1.5 A and 2-3 at 4.0 A. Vendored as .txt (not .top/.crd) for the same reason the
+# leap-log fixture is: keep it obviously a test artifact, not a real build output.
+
+STRUCT_TOP = HERE / "fixtures" / "structural_cross_gap_prmtop.txt"
+STRUCT_CRD = HERE / "fixtures" / "structural_cross_gap_crd.txt"
+
+
+def test_prmtop_bonds(tmp: Path):
+    # Committed fixture: (0,1) from INC_HYDROGEN then (2,3) from WITHOUT_HYDROGEN.
+    # Hand-derived from the triples (3*ai, 3*aj, type) // 3.
+    check("prmtop_bonds reads both blocks, in order",
+          W.prmtop_bonds(STRUCT_TOP) == [(0, 1), (2, 3)],
+          repr(W.prmtop_bonds(STRUCT_TOP)))
+    # FAIL-CLOSED: both BONDS blocks are mandatory. NO bonds blocks -> None
+    # (could-not-verify), never [] (which would read as a clean topology).
+    nob = tmp / "nobonds.top"
+    nob.write_text("%FLAG POINTERS\n%FORMAT(10I8)\n       4\n"
+                   "%FLAG MASS\n%FORMAT(5E16.8)\n  1.0\n")
+    check("prmtop_bonds no BONDS blocks -> None (fail-closed)",
+          W.prmtop_bonds(nob) is None, repr(W.prmtop_bonds(nob)))
+    # FAIL-CLOSED: BONDS_WITHOUT_HYDROGEN missing (where a heavy-atom cross-gap
+    # bond lives) -> None even though INC_HYDROGEN parsed.
+    onlyinc = tmp / "onlyinc.top"
+    onlyinc.write_text(
+        "%FLAG POINTERS\n%FORMAT(10I8)\n       4\n"
+        "%FLAG BONDS_INC_HYDROGEN\n%FORMAT(10I8)\n       0       3       1\n"
+        "%FLAG MASS\n%FORMAT(5E16.8)\n 1.0\n")
+    check("prmtop_bonds missing WITHOUT_HYDROGEN -> None (fail-closed)",
+          W.prmtop_bonds(onlyinc) is None, repr(W.prmtop_bonds(onlyinc)))
+    # A %COMMENT line between %FLAG and %FORMAT (permitted by the AMBER format)
+    # is tolerated, not silently dropped.
+    withcomment = tmp / "comment.top"
+    withcomment.write_text(
+        "%FLAG BONDS_INC_HYDROGEN\n%COMMENT bogus\n%FORMAT(10I8)\n       0       3       1\n"
+        "%FLAG BONDS_WITHOUT_HYDROGEN\n%FORMAT(10I8)\n       6       9       1\n"
+        "%FLAG MASS\n%FORMAT(5E16.8)\n 1.0\n")
+    check("prmtop_bonds tolerates %COMMENT between %FLAG and %FORMAT",
+          W.prmtop_bonds(withcomment) == [(0, 1), (2, 3)],
+          repr(W.prmtop_bonds(withcomment)))
+    # Non-integer token inside a BONDS block -> ValueError -> None.
+    bad = tmp / "badbonds.top"
+    bad.write_text(
+        "%FLAG BONDS_INC_HYDROGEN\n%FORMAT(10I8)\n       0       3       1\n"
+        "%FLAG BONDS_WITHOUT_HYDROGEN\n%FORMAT(10I8)\n"
+        "       0       X       1\n%FLAG MASS\n%FORMAT(5E16.8)\n 1.0\n")
+    check("prmtop_bonds non-integer token -> None", W.prmtop_bonds(bad) is None,
+          repr(W.prmtop_bonds(bad)))
+    # Missing file -> None (OSError caught).
+    check("prmtop_bonds missing file -> None",
+          W.prmtop_bonds(tmp / "nope.top") is None)
+
+
+def test_read_amber_coords(tmp: Path):
+    # Committed fixture: 4 atoms; exact xyz hand-derived from the 6F12.7 lines.
+    coords = W.read_amber_coords(STRUCT_CRD, 4)
+    check("read_amber_coords exact xyz",
+          coords == [(0.0, 0.0, 0.0), (1.5, 0.0, 0.0),
+                     (10.0, 0.0, 0.0), (14.0, 0.0, 0.0)], repr(coords))
+    # crd header NATOM disagrees with the requested (prmtop) NATOM -> None: a
+    # stale/mismatched coordinate file must not be read as the wrong geometry.
+    check("read_amber_coords header NATOM mismatch -> None",
+          W.read_amber_coords(STRUCT_CRD, 5) is None,
+          repr(W.read_amber_coords(STRUCT_CRD, 5)))
+    # Header matches but the body is truncated (< 3*natom values) -> None.
+    trunc = tmp / "trunc.crd"
+    trunc.write_text("t\n       4\n"
+                     f"{0.0:12.7f}{0.0:12.7f}{0.0:12.7f}\n")  # 3 of 12 needed
+    check("read_amber_coords truncated body -> None",
+          W.read_amber_coords(trunc, 4) is None,
+          repr(W.read_amber_coords(trunc, 4)))
+    # < 2 lines (no coordinate body) -> None.
+    short = tmp / "short.crd"
+    short.write_text("title only\n")
+    check("read_amber_coords no body -> None",
+          W.read_amber_coords(short, 1) is None)
+    # Non-numeric coordinate field -> None.
+    badc = tmp / "bad.crd"
+    badc.write_text("t\n   1\n   not_a_num\n")
+    check("read_amber_coords non-numeric -> None",
+          W.read_amber_coords(badc, 1) is None)
+    # Missing file -> None.
+    check("read_amber_coords missing file -> None",
+          W.read_amber_coords(tmp / "nope.crd", 1) is None)
+
+
+def test_structural_long_bonds(tmp: Path):
+    # Committed cross-gap fixture: bond (2,3)=4.0 A > 3.0; (0,1)=1.5 A. Only the
+    # 4.0 A bond is returned (the normal bond does not false-fire).
+    got = W.structural_long_bonds(STRUCT_TOP, STRUCT_CRD)
+    check("structural finds the 4.0 A cross-gap bond only", got == [4.0],
+          repr(got))
+    # Clean geometry (both bonds < 3 A) -> [] : proves normal bonds never trip it.
+    clean_top = tmp / "clean.top"
+    clean_top.write_text(
+        "%FLAG POINTERS\n%FORMAT(10I8)\n       4\n"
+        "%FLAG BONDS_INC_HYDROGEN\n%FORMAT(10I8)\n       0       3       1\n"
+        "%FLAG BONDS_WITHOUT_HYDROGEN\n%FORMAT(10I8)\n       6       9       1\n"
+        "%FLAG MASS\n%FORMAT(5E16.8)\n 1.0\n")
+    clean_crd = tmp / "clean.crd"
+    clean_crd.write_text(
+        "t\n       4\n"
+        f"{0.0:12.7f}{0.0:12.7f}{0.0:12.7f}{1.5:12.7f}{0.0:12.7f}{0.0:12.7f}\n"
+        f"{5.0:12.7f}{0.0:12.7f}{0.0:12.7f}{6.5:12.7f}{0.0:12.7f}{0.0:12.7f}\n")
+    check("structural clean geometry -> [] (no false-fire)",
+          W.structural_long_bonds(clean_top, clean_crd) == [],
+          repr(W.structural_long_bonds(clean_top, clean_crd)))
+    # NATOM > coords available -> coords parse returns None -> None (could-not-verify).
+    mism_crd = tmp / "mism.crd"
+    mism_crd.write_text(f"t\n       2\n{0.0:12.7f}{0.0:12.7f}{0.0:12.7f}"
+                        f"{1.5:12.7f}{0.0:12.7f}{0.0:12.7f}\n")
+    check("structural natom>coords -> None",
+          W.structural_long_bonds(STRUCT_TOP, mism_crd) is None,
+          repr(W.structural_long_bonds(STRUCT_TOP, mism_crd)))
+    # Bond index beyond NATOM (internally inconsistent prmtop) -> None.
+    oob_top = tmp / "oob.top"
+    oob_top.write_text(
+        "%FLAG POINTERS\n%FORMAT(10I8)\n       2\n"
+        "%FLAG BONDS_WITHOUT_HYDROGEN\n%FORMAT(10I8)\n"
+        "       0       9       1\n"  # references atom 3 (=9//3) but NATOM=2
+        "%FLAG MASS\n%FORMAT(5E16.8)\n 1.0\n")
+    oob_crd = tmp / "oob.crd"
+    oob_crd.write_text(f"t\n       2\n{0.0:12.7f}{0.0:12.7f}{0.0:12.7f}"
+                       f"{1.0:12.7f}{0.0:12.7f}{0.0:12.7f}\n")
+    check("structural bond index out of range -> None",
+          W.structural_long_bonds(oob_top, oob_crd) is None,
+          repr(W.structural_long_bonds(oob_top, oob_crd)))
+    # Missing top -> None.
+    check("structural missing top -> None",
+          W.structural_long_bonds(tmp / "nope.top", STRUCT_CRD) is None)
+
+
+def test_validate_cross_gap_structural(tmp: Path):
+    """Fail-CLOSED: the structural detector fires CROSS_GAP from the built
+    comp_dry topology+coords even with NO log `bond of` line (teLeap reworded or
+    dropped it). Uses the committed real-format cross-gap fixture as comp_dry."""
+    rd = _make_run_dir(tmp, "v_gap_struct")
+    (rd / "comp_dry.top").write_text(STRUCT_TOP.read_text())  # NATOM=4, ALA, 4.0 A gap
+    (rd / "comp_dry.crd").write_text(STRUCT_CRD.read_text())
+    write_prmtop(rd / "comp_oct.top", natom=5000, res_labels=None)
+    for f in ("comp_oct.crd", "comp_oct.pdb"):
+        (rd / f).write_text("x\n")
+    # No bond_lengths_angstrom in log_info -> ONLY the structural signal can fire.
+    validation, errors = W.validate(rd, has_ligand=False,
+                                    log_errors=[], log_info={})
+    joined = " ".join(errors)
+    check("structural-only fires CROSS_GAP (no log signal present)",
+          "CROSS_GAP_SPURIOUS_BOND" in joined, repr(errors))
+    check("structural CROSS_GAP tagged [detected via structural]",
+          "detected via structural]" in joined, repr(errors))
+    check("structural CROSS_GAP reports the 4.0 A length",
+          "4.0" in joined, repr(errors))
+    check("structural_long_bonds recorded in validation",
+          validation.get("structural_long_bonds") == [4.0],
+          repr(validation.get("structural_long_bonds")))
+    check("structural CROSS_GAP is the only error", len(errors) == 1,
+          repr(errors))
+
+    # Both signals present -> union of lengths, tagged structural+log.
+    _, errors2 = W.validate(rd, has_ligand=False, log_errors=[],
+                            log_info={"bond_lengths_angstrom": [5.23]})
+    joined2 = " ".join(errors2)
+    check("both signals -> [detected via structural+log]",
+          "detected via structural+log]" in joined2, repr(errors2))
+    # Structural is authoritative geometry: the reported length is the structural
+    # 4.0, not the injected log 5.23 (a set-union would have listed both).
+    check("both fire; reports authoritative structural 4.0, not the log 5.23",
+          "4.0" in joined2 and "5.23" not in joined2, repr(errors2))
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -490,6 +668,10 @@ def main():
         test_parse_leap_log_real_fixture()
         test_validate_solvent(tmp)
         test_validate_cross_gap(tmp)
+        test_prmtop_bonds(tmp)
+        test_read_amber_coords(tmp)
+        test_structural_long_bonds(tmp)
+        test_validate_cross_gap_structural(tmp)
 
     total = PASS + FAIL
     print(f"\n{total} assertions: {PASS} PASS, {FAIL} FAIL")
