@@ -114,11 +114,21 @@ endpoint can never disagree after an edit. The ramp START (`value1`/`tempi`) is 
 written). Re-run with `--couple` (cohere `value2`) or `--keep-value2` (edit `temp0` only,
 keep the mismatch).
 
-*Scope:* the gate (like the coupling it guards) recognizes the advisor's form — a single-
-quoted `type = 'TEMP0'` ramp block with plain-decimal `value2`. Other Fortran spellings the
-parser doesn't yet read — double-quoted `"TEMP0"`, `d`-exponent literals like `3.05d2` — fall
-through uncoupled and ungated (tracked under arbitrary-mdin-shapes future work; the same
-parser scope bounds the vendored validator, so gate and validator stay consistent).
+*Scope (parser edges).* The gate's ramp-block finder (`temp0_wt_span`) matches the advisor's
+form — a single-quoted `type = 'TEMP0'` block with a plain-decimal `value2`. Two non-advisor
+Fortran spellings behave *differently*, and are **not** co-scoped with the vendored `check_amber`
+validator (whose namelist parser strips *both* quote styles, making it **broader** than the gate):
+
+- **Double-quoted `"TEMP0"`** — the gate's single-quoted finder does not match it, so a `temp0`
+  edit is applied alone and a pre-existing `value2` mismatch is left un-coupled and un-halted
+  *by the gate*. The validator **does** read it (quotes stripped) and still WARNs on the
+  mismatch — so it is caught, just by the validator rather than the gate.
+- **`d`-exponent `value2` (e.g. `3.05d2`)** — the value regex captures only the decimal prefix
+  (`3.05`), so it does **not** fall through ungated: the truncated `3.05` reads as a phantom
+  mismatch against `temp0` and **trips** the coherence halt (`needs_human`, default). With
+  `--couple` it is rewritten to a corrupt `305.0d2` (= 30 500 K) shipped `ok:true`. Tracked as a
+  parser-scope candidate gate (reject any non-ASCII-finite `value2` as `INVALID_VALUE` *before*
+  the coherence decision, in the shared parser layer) — see the vault's `Gap_Gate_Coverage`.
 
 ## `submit.sh` portability
 

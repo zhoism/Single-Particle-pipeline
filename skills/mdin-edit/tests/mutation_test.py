@@ -58,7 +58,7 @@ def restore(md: Path):
 
 
 def run_sub(wrapper: Path, md: Path, selector, param, value):
-    cmd = ["python3", str(wrapper), "--md-dir", str(md), "--stage", str(selector),
+    cmd = [sys.executable, str(wrapper), "--md-dir", str(md), "--stage", str(selector),
            "--param", str(param), "--value", str(value)]
     p = subprocess.run(cmd, capture_output=True, text=True)
     try:
@@ -145,7 +145,7 @@ def verify_restraint(wrapper: Path, base: Path, selector, op, wt, mask) -> list[
     else:
         extra = ["--stage", selector, "--disable-restraints"]
         exp = O.spec_disable(selector, GT)
-    p = subprocess.run(["python3", str(wrapper), "--md-dir", str(d)] + extra,
+    p = subprocess.run([sys.executable, str(wrapper), "--md-dir", str(d)] + extra,
                        capture_output=True, text=True)
     try:
         env = json.loads(p.stdout)
@@ -186,7 +186,7 @@ def verify_noshake_dt(wrapper: Path, base: Path) -> list[str]:
     d.mkdir(parents=True, exist_ok=True)
     f = d / "heat-1.in"
     f.write_text(NOSHAKE, newline="")
-    p = subprocess.run(["python3", str(wrapper), "--md-dir", str(d), "--stage", "heat-1",
+    p = subprocess.run([sys.executable, str(wrapper), "--md-dir", str(d), "--stage", "heat-1",
                         "--param", "dt", "--value", "0.002"], capture_output=True, text=True)
     try:
         env = json.loads(p.stdout)
@@ -197,6 +197,42 @@ def verify_noshake_dt(wrapper: Path, base: Path) -> list[str]:
         probs.append(f"noshake dt=0.002: exp OUT_OF_BOUNDS got ok={env.get('ok')} {env.get('errors')}")
     if f.read_text() != NOSHAKE:
         probs.append("noshake dt=0.002: file modified")
+    return probs
+
+
+# Pre-incoherent heat stage: &cntrl temp0=300 but &wt TEMP0 ramp ends at value2=310
+# (|Δ|>0.5 K BEFORE any edit). Editing temp0 here without --couple/--keep-value2 must
+# HALT (needs_human) rather than silently auto-couple value2. This is the fixture that
+# gives the safety-critical coherence gate its mutation coverage.
+INCOHERENT_HEAT = (
+    " &cntrl\n  imin = 0,\n  nstlim = 50000,\n  dt = 0.002,\n  cut = 9.0,\n"
+    "  ntc = 2,\n  ntf = 2,\n  tempi = 200.0,\n  temp0 = 300.0,\n  nmropt = 1,\n /\n"
+    " &wt\n  type = 'TEMP0',\n  istep1 = 0, istep2 = 40000,\n"
+    "  value1 = 200.0, value2 = 310.0,\n /\n"
+    " &wt\n  type = 'END',\n /\n"
+)
+
+
+def verify_needs_human_halt(wrapper: Path, base: Path) -> list[str]:
+    """Editing temp0 on a pre-incoherent stage (no coupling flag) must return a
+    needs_human halt (HEAT_TEMP0_INCOHERENT) and leave the file byte-unchanged.
+    Kills any mutant that drops the `pre_mismatch and couple_mode is None` guard."""
+    d = base / "needs-human"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "heat-1.in"
+    f.write_text(INCOHERENT_HEAT, newline="")
+    before = _read_raw(f)
+    env, p = run_sub(wrapper, d, "heat-1", "temp0", "305")
+    if env is None:
+        return [f"needs_human: no-json (rc={p.returncode})"]
+    probs = []
+    if env.get("ok") is not False or not any(
+            "HEAT_TEMP0_INCOHERENT" in e or "EDIT_HALTED" in e
+            for e in env.get("errors", [])):
+        probs.append("needs_human: exp HEAT_TEMP0_INCOHERENT halt got "
+                     f"ok={env.get('ok')} {env.get('errors')}")
+    if _read_raw(f) != before:
+        probs.append("needs_human: file modified despite halt")
     return probs
 
 
@@ -274,6 +310,10 @@ MUTANTS = [
      [('sched["trajectory_off"] = True',
        'sched["trajectory_off"] = True; warnings.append("MUTANT")')],
      "nstlim schedule warns even when ntwx=0 (trajectory off by design)", False),
+    # ---- coherence-halt safety mutant (2026-06-30 gate-hardening) ----
+    ("drop-needs-human-gate",
+     [("if pre_mismatch and couple_mode is None:", "if False:  # mutant")],
+     "needs_human coherence halt removed (silently auto-couples on pre-mismatch)", False),
 ]
 
 
@@ -290,8 +330,12 @@ def apply_mutant(name, repls):
 
 
 def main() -> int:
-    base = SKILL_DIR / "test-runs" / "mutation"
-    base.mkdir(parents=True, exist_ok=True)
+    # Isolated per-run scratch (avoids cross-run state bleed — the interpreter-mix
+    # baseline flake surfaced in the 2026-06-27 review). report.json stays in a
+    # stable dir for convenience.
+    report_dir = SKILL_DIR / "test-runs" / "mutation"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    base = Path(tempfile.mkdtemp(prefix="mdin-mut-"))
     md = make_md(base, "scratch")
 
     # Sanity: the REAL engine must pass the whole slice (baseline green).
@@ -301,6 +345,7 @@ def main() -> int:
         base_probs += [(sel, p, v, x) for x in verify_one(SCRIPTS / "wrapper.py", sel, p, v, md)]
     base_probs += [("ambig", "", "", x) for x in verify_ambiguous(SCRIPTS / "wrapper.py", base)]
     base_probs += [("noshake", "", "", x) for x in verify_noshake_dt(SCRIPTS / "wrapper.py", base)]
+    base_probs += [("needs_human", "", "", x) for x in verify_needs_human_halt(SCRIPTS / "wrapper.py", base)]
     for sel, op, wt, mk in RESTRAINT_SLICE:
         base_probs += [(sel, op, "", x) for x in verify_restraint(SCRIPTS / "wrapper.py", base, sel, op, wt, mk)]
     if base_probs:
@@ -333,6 +378,10 @@ def main() -> int:
             if probs:
                 killer = f"noshake: {probs[0]}"
         if killer is None:
+            probs = verify_needs_human_halt(wp, base)
+            if probs:
+                killer = f"needs_human: {probs[0]}"
+        if killer is None:
             for sel, op, wt, mk in RESTRAINT_SLICE:
                 probs = verify_restraint(wp, base, sel, op, wt, mk)
                 if probs:
@@ -353,7 +402,8 @@ def main() -> int:
         "killed": [{"mutant": k, "invariant": i, "killer": w} for k, i, w in killed],
         "survived": [{"mutant": s[0], "note": s[1] if len(s) > 1 else ""} for s in survived],
     }
-    (base / "report.json").write_text(json.dumps(report, indent=2))
+    (report_dir / "report.json").write_text(json.dumps(report, indent=2))
+    shutil.rmtree(base, ignore_errors=True)
     return 1 if survived else 0
 
 
