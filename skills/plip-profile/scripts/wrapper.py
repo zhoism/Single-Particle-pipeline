@@ -386,8 +386,11 @@ def extract_frame_pdb(cpptraj: str, cwd: Path, frame_1based: int,
 # Required PLIP flags. --nohydro is LOAD-BEARING: tleap already placed (and MD
 # equilibrated) the hydrogens, and they are authoritative. Without --nohydro PLIP
 # strips them and re-adds polar H via OpenBabel, which is non-deterministic ->
-# it breaks this skill's advertised byte-identical re-runs and can flip
-# H-bond / salt-bridge calls frame-to-frame. (-t text report, -x XML report.)
+# it breaks this skill's advertised byte-identical re-runs and can flip H-bond
+# calls (which depend directly on H positions) frame-to-frame — and, less often,
+# salt-bridge calls, whose charged-group distances are largely H-insensitive but
+# can shift if re-protonation changes which groups read as charged. (-t text
+# report, -x XML report.)
 # Trade-off acknowledged: keeping tleap H still leaves OpenBabel responsible for
 # bond perception, so this fixes determinism, not every perception risk.
 PLIP_REQUIRED_FLAGS: tuple[str, ...] = ("-t", "-x", "--nohydro")
